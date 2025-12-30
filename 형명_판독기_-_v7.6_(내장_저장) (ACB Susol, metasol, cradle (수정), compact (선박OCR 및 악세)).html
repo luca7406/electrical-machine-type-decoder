@@ -30,13 +30,16 @@
   .slot-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
   .slot-box{flex:1;min-width:140px}
   #err{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#fee2e2;border:1px solid #fecaca;color:#7f1d1d}
+  #roiBox{display:none;border:1px dashed #94a3b8;border-radius:10px;padding:8px;background:#f8fafc}
+  #roiCanvas{border:1px solid #cbd5e1;border-radius:8px;max-width:100%;touch-action:none}
+  #roiOverlayHint{font-size:.85rem;color:#334155;margin-top:4px}
   @media (max-width:640px){
     .flex{flex-direction:column}
     .card{flex:1 1 100%}
     .row{flex-direction:column}
   }
 </style>
-<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
 <!-- 설정 JSON: 이 블록이 ‘저장’으로 갱신됩니다 -->
@@ -991,6 +994,27 @@
         <button id="ocrBtn">이미지에서 텍스트 읽기</button>
       </div>
 
+      <div id="roiBox" class="stack">
+        <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+          <label class="row" style="align-items:center;gap:6px;margin:0;">
+            <input type="checkbox" id="roiToggle">
+            <span>ROI 수동 선택 모드</span>
+          </label>
+          <button id="roiResetBtn" type="button">ROI 리셋</button>
+          <span class="small" id="roiInfo"></span>
+        </div>
+        <canvas id="roiCanvas" width="1" height="1"></canvas>
+        <div id="roiOverlayHint">이미지를 업로드한 뒤, 형명 줄을 마우스로 드래그하여 선택하세요.</div>
+      </div>
+
+      <div class="stack" style="margin-top:6px">
+        <label class="row" style="align-items:center;gap:6px;">
+          <input type="checkbox" id="showRawOcr" checked>
+          <span>OCR 원문 표시 (디버그)</span>
+        </label>
+        <textarea id="ocrRawText" rows="4" readonly style="display:block;min-height:90px" placeholder="OCR 원문이 여기에 표시됩니다"></textarea>
+      </div>
+
       <div class="row">
         <button id="decodeBtn">판독</button>
         <button id="toggleSettingsBtn">⚙️ 설정</button>
@@ -1333,24 +1357,55 @@
 
 // ===== 형명 추출기 (AN-13D3-13H, AH10D3-10A 등) =====
 function extractModel(text) {
-  const lines = text.toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const rawLines = text.toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const cleanLine = ln => ln
+    .replace(/[–—−]/g, '-') // en/em dash → hyphen
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/[^A-Z0-9-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const lines = rawLines
+    .map(cleanLine)
+    .map(ln => [ln, ln.replace(/\s+/g, '')]) // 여백 제거 버전도 함께 검사
+    .flat()
+    .filter(Boolean);
+
   const regs = [
-    /\b[A-Z]{1,3}-\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,   // AN-13D3-13H / AH-10D3-10A
-    /\b[A-Z]{1,3}\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,    // AH10D3-10A (첫 하이픈 없이 시작)
-    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g           // 여유 패턴(하이픈 1~2개 포함, 숫자 포함)
+    /\b[A-Z]{1,3}-?\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,    // AN-13D3-13H / AH-10D3-10A / AH10D3-10A
+    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g                 // 여유 패턴(하이픈 1~2개 포함, 숫자 포함)
   ];
+
+  const normalizeCandidate = s => s
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/O(?=\d)/g, '0')
+    .replace(/(?<=\d)O/g, '0');
 
   let cands = [];
   for (const r of regs) {
     for (const ln of lines) {
       const ms = [...ln.matchAll(r)];
       for (const m of ms) {
-        // “AIR-CIRCUIT-BREAKER” 같은 전부 문자만인 후보 제거
-        if (/\d/.test(m[0])) cands.push(m[0]);
+        const cand = normalizeCandidate(m[0]);
+        if (/\d/.test(cand)) cands.push(cand);
       }
     }
   }
+
+  // 여유 패턴이 없는 경우를 대비해 8~16자 알파뉴메릭/하이픈 뭉치도 수집
+  if (!cands.length) {
+    const loose = /[A-Z0-9-]{8,16}/g;
+    for (const ln of lines) {
+      const ms = [...ln.matchAll(loose)];
+      ms.forEach(m => cands.push(normalizeCandidate(m[0])));
+    }
+  }
+
   cands = [...new Set(cands)];
+  cands = cands.filter(s => s.includes('-'));
   if (!cands.length) return null;
 
   // 점수: 하이픈 2개 선호, 숫자 2개 이상, 길이 적당(8~20), A로 시작 선호
@@ -1364,7 +1419,11 @@ function extractModel(text) {
     return sc;
   };
   cands.sort((a, b) => score(b) - score(a));
-  return cands[0];
+  const best = cands[0] || null;
+  if (!best) return null;
+  if (!/-/.test(best)) return null;
+  if (!/^[A-Z0-9-]{6,}$/.test(best)) return null;
+  return best;
 }
 
   // ---- OCR 핸들러 교체 시작 ----
@@ -1376,7 +1435,7 @@ async function ensureTesseract() {
   // 1차: jsDelivr
   await new Promise((res, rej) => {
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
     s.crossOrigin = 'anonymous';
     s.onload = res; s.onerror = rej;
     document.head.appendChild(s);
@@ -1388,6 +1447,723 @@ async function ensureTesseract() {
   throw new Error('Tesseract 라이브러리 로드 실패');
 }
 
+// 긴 네트워크/연산 지연에서 UI가 멈춘 것처럼 보이지 않도록 타임아웃을 건다.
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(label || `작업이 ${ms / 1000}초 안에 끝나지 않았습니다.`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const NAMEPLATE_TOP_RATIO_PRIMARY = 0.45;
+const NAMEPLATE_TOP_RATIO_SECONDARY = 0.55;
+const NAMEPLATE_TOP_RATIOS = [0.45, 0.55, 0.7, 0.85, 1.0];
+const OCR_UPSCALE_FACTOR = 2;
+const OCR_CONTRAST_BOOST = 1.6;
+const OCR_THRESHOLD = 170;
+const MAX_PREVIEW_WIDTH = 640;
+const MAX_PREVIEW_HEIGHT = 420;
+
+async function preprocessCroppedCanvas(canvas, {
+  upscaleFactor = OCR_UPSCALE_FACTOR,
+  contrast = OCR_CONTRAST_BOOST,
+  threshold = OCR_THRESHOLD
+} = {}) {
+  if (!canvas) return null;
+
+  const target = document.createElement('canvas');
+  target.width = Math.max(1, Math.round(canvas.width * upscaleFactor));
+  target.height = Math.max(1, Math.round(canvas.height * upscaleFactor));
+
+  const ctx = target.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, target.width, target.height);
+
+  const imgData = ctx.getImageData(0, 0, target.width, target.height);
+  const data = imgData.data;
+  const clamp = v => Math.max(0, Math.min(255, v));
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    // Grayscale
+    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    // Contrast boost
+    gray = (gray - 128) * contrast + 128;
+    gray = clamp(gray);
+    // Threshold to binary
+    const bin = gray >= threshold ? 255 : 0;
+    data[i] = data[i + 1] = data[i + 2] = bin;
+    data[i + 3] = 255;
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+
+  return await new Promise((resolve, reject) => {
+    target.toBlob(b => b ? resolve(b) : reject(new Error('이미지 전처리 실패')), 'image/png', 1);
+  });
+}
+
+async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
+  if (!file) return null;
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('이미지 로드 실패'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    el.src = dataUrl;
+  });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = Math.round(img.height * topRatio);
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+
+  return await preprocessCroppedCanvas(canvas);
+}
+
+function normalizeNameplateText(text) {
+  return (text || '')
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/[^A-Z0-9-\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function applyContextualOZeroFix(value, label = '최종 보정') {
+  const before = value || '';
+  const after = before
+    .replace(/(\d)O/g, '$10')
+    .replace(/O(\d)/g, '0$1');
+  appendRawLog(label, `보정 전: ${before}\n보정 후: ${after}`);
+  return after;
+}
+
+function extractNameplateModelOnly(text) {
+  const rawLines = (text || '').toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const cleanLine = ln => ln
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/[^A-Z0-9-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const lines = rawLines
+    .map(cleanLine)
+    .map(ln => [ln, ln.replace(/\s+/g, '')])
+    .flat()
+    .filter(Boolean);
+
+  const regs = [
+    /\b[A-Z]{1,3}-?\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,
+    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g
+  ];
+
+  const normalizeCandidate = s => s
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/O(?=\d)/g, '0')
+    .replace(/(?<=\d)O/g, '0');
+
+  let cands = [];
+  for (const r of regs) {
+    for (const ln of lines) {
+      const matches = ln.match(r);
+      if (matches) cands.push(...matches.map(normalizeCandidate));
+    }
+  }
+
+  cands = [...new Set(cands)].filter(s => s.includes('-'));
+  if (!cands.length) return null;
+
+  const score = s => {
+    let sc = 0;
+    if ((s.match(/-/g) || []).length >= 2) sc += 3;
+    if ((s.match(/\d/g) || []).length >= 2) sc += 2;
+    if (/^A[A-Z]/.test(s)) sc += 2;
+    const coreLen = s.replace(/-/g, '').length;
+    sc += Math.max(0, 14 - Math.abs(coreLen - 10));
+    return sc;
+  };
+  cands.sort((a, b) => score(b) - score(a));
+  const best = cands[0] || null;
+  if (!best) return null;
+  if (!/-/.test(best)) return null;
+  if (!/^[A-Z0-9-]{6,}$/.test(best)) return null;
+  return best;
+}
+
+function extractNameplateModelPlusCodes(text, forcedModel = null) {
+  const norm = normalizeNameplateText(text || '');
+  if (!norm) return null;
+
+  const model = forcedModel || extractNameplateModelOnly(text || '');
+  if (!model) return null;
+
+  const rawLines = (text || '').toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+  const canon = s => s
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .trim();
+
+  const modelCanon = canon(model);
+  let modelLineIdx = -1;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const lineCanon = canon(rawLines[i]);
+    if (lineCanon.includes(modelCanon)) {
+      modelLineIdx = i;
+      break;
+    }
+  }
+
+  const candidateLines = [];
+  if (modelLineIdx >= 0) {
+    candidateLines.push(rawLines[modelLineIdx]);
+    if (modelLineIdx + 1 < rawLines.length) candidateLines.push(rawLines[modelLineIdx + 1]);
+  } else {
+    candidateLines.push(norm);
+  }
+
+  const auxRe = /\b[A-Z0-9]{6,12}\b/g;
+  const hasExp = /\bEXP\b/.test(norm);
+
+  const aux = [];
+  for (const ln of candidateLines) {
+    const cleaned = ln
+      .toUpperCase()
+      .replace(/[–—−]/g, '-')
+      .replace(/[^A-Z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const m = cleaned.match(auxRe);
+    if (m) aux.push(...m);
+  }
+
+  const uniq = [];
+  const seen = new Set();
+  const modelNoDash = modelCanon.replace(/-/g, '');
+  for (const t of aux) {
+    const tt = t.trim();
+    if (!tt) continue;
+    if (/^\d+$/.test(tt)) continue;
+    if (canon(tt) === modelCanon) continue;
+    if (canon(tt) === modelNoDash) continue;
+    if (seen.has(tt)) continue;
+    seen.add(tt);
+    uniq.push(tt);
+    if (uniq.length >= 2) break;
+  }
+
+  const parts = [model];
+  if (uniq.length) parts.push(...uniq);
+  if (hasExp) parts.push('EXP');
+
+  return parts.join(' ');
+}
+
+function splitAuxSequence(seq) {
+  const s = (seq || '').replace(/[^A-Z0-9]/g, '');
+  const len = s.length;
+  if (len < 6) return [];
+
+  if (len >= 6 && len <= 12) return [s];
+
+  const preferTwoTokenSplit = () => {
+    let best = null;
+    for (let a = 6; a <= 12; a++) {
+      for (let b = 6; b <= 12; b++) {
+        if (a + b !== len) continue;
+        const score = (10 - Math.abs(10 - a)) + (10 - Math.abs(10 - b));
+        if (!best || score > best.score) best = { a, b, score };
+      }
+    }
+    return best;
+  };
+
+  const twoToken = preferTwoTokenSplit();
+  if (twoToken) return [s.slice(0, twoToken.a), s.slice(twoToken.a)];
+
+  const tokens = [];
+  let pos = 0;
+  while (len - pos >= 6 && tokens.length < 2) {
+    const remain = len - pos;
+    const take = Math.min(12, Math.max(6, remain - 6));
+    const chunk = s.slice(pos, pos + take);
+    if (chunk.length >= 6 && chunk.length <= 12) tokens.push(chunk);
+    pos += take;
+  }
+  return tokens;
+}
+
+function extractAuxTokensFromText(text, model) {
+  const canon = (s) => (s || '')
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .trim();
+
+  const modelCanon = canon(model || '');
+  const upper = (text || '').toUpperCase();
+  const lines = upper.split(/\r?\n/);
+  const lineCanon = lines.map(l => canon(l));
+  const modelLineIdx = lineCanon.findIndex(l => l.includes(modelCanon) || l.includes(modelCanon.replace(/-/g, '')));
+
+  const auxTokens = [];
+  const decomposition = [];
+  const usedLines = [];
+  let expDetected = false;
+
+  const pushToken = (tok, sourceLabel, relation, fromChunk) => {
+    const t = (tok || '').trim();
+    if (!t) return;
+    if (t.length < 6 || t.length > 12) return;
+    if (/^\d+$/.test(t)) return;
+    const canonTok = canon(t);
+    if (!canonTok) return;
+    if (canonTok === modelCanon || canonTok === modelCanon.replace(/-/g, '')) return;
+    if (auxTokens.find(a => a.value === canonTok)) return;
+    auxTokens.push({ value: canonTok, raw: t, source: sourceLabel, relation, chunk: fromChunk });
+  };
+
+  const removeModelFromLine = (line) => {
+    let res = line;
+    if (modelCanon) {
+      const escaped = modelCanon.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+      res = res.replace(new RegExp(escaped, 'g'), ' ');
+      const noDash = modelCanon.replace(/-/g, '');
+      if (noDash) res = res.replace(new RegExp(noDash, 'g'), ' ');
+    }
+    return res;
+  };
+
+  if (modelLineIdx < 0) {
+    decomposition.push('모델 라인을 찾지 못해 aux 추출 생략');
+    return { tokens: [], hasExp: false, decomposition, modelLineIdx: -1, usedLines: [] };
+  }
+
+  const targetIdx = [];
+  if (modelLineIdx + 1 < lines.length) targetIdx.push(modelLineIdx + 1);
+  if (modelLineIdx + 2 < lines.length) targetIdx.push(modelLineIdx + 2);
+
+  targetIdx.forEach((idx) => {
+    const relation = idx === modelLineIdx + 1 ? 'next-line' : 'second-next';
+    let line = lines[idx] || '';
+    if (/EXP\b/.test(line)) {
+      expDetected = true;
+      line = line.replace(/EXP\b/g, ' ');
+    }
+    const cleanedLine = removeModelFromLine(line || '');
+    usedLines.push({ index: idx, line: cleanedLine.trim() });
+    const spaced = (cleanedLine.match(/\b[A-Z0-9]{6,12}\b/g) || []);
+    if (spaced.length) {
+      decomposition.push(`(${relation}) spaced 원본: ${cleanedLine.trim()} -> ${spaced.join(', ')}`);
+      for (const tok of spaced) pushToken(tok, 'spaced', relation, cleanedLine.trim());
+    }
+
+    const gluedSource = (cleanedLine.replace(/[^A-Z0-9]/g, ' ') || '').match(/[A-Z0-9]{6,}/g) || [];
+    for (const seq of gluedSource) {
+      const tokens = splitAuxSequence(seq);
+      decomposition.push(`(${relation}) glued 원본: ${seq} -> ${tokens.join(', ') || '없음'}`);
+      for (const tok of tokens) pushToken(tok, 'glued', relation, seq);
+    }
+  });
+
+  return { tokens: auxTokens, hasExp: expDetected, decomposition, modelLineIdx, usedLines };
+}
+
+function gatherAuxFromContexts(model, contexts) {
+  const canonModel = (model || '').toUpperCase().replace(/[–—−]/g, '-').replace(/\s+/g, '');
+  const auxMap = new Map();
+  const excluded = [];
+  const decompositionLogs = [];
+  let expDetected = false;
+  const modelLineInfos = [];
+  const auxSources = [];
+
+  const evaluateAuxToken = (tok) => {
+    const value = tok?.value || '';
+    const len = value.length;
+    const digits = (value.match(/\d/g) || []).length;
+    const alphas = (value.match(/[A-Z]/g) || []).length;
+    const digitRatio = len ? digits / len : 0;
+    if (len < 6 || len > 12) return { exclude: true, reason: '길이 6~12 아님' };
+    if (/^\d+$/.test(value)) return { exclude: true, reason: '순수 숫자' };
+    if (/\d{4,}/.test(value)) return { exclude: true, reason: '숫자 4개 이상 연속' };
+    if (digitRatio >= 0.5) return { exclude: true, reason: '숫자 비율 50% 이상' };
+    if (len > 10 && digits >= 3) return { exclude: true, reason: '길이 > 10 & 숫자 3개 이상' };
+
+    let score = 0;
+    if (alphas && alphas / len >= 0.7) score += 3;
+    if (len >= 6 && len <= 8) score += 2;
+    if (tok.relation === 'next-line' || tok.relation === 'second-next') score += 3;
+    if (score <= 0) return { exclude: true, reason: '유효 가점 없음' };
+    return { exclude: false, score };
+  };
+
+  for (const ctx of contexts || []) {
+    const text = ctx?.text || '';
+    const label = ctx?.label || 'N/A';
+    const canonText = normalizeNameplateText(text).replace(/\s+/g, '');
+    if (!canonText.includes(canonModel) && !canonText.includes(canonModel.replace(/-/g, ''))) {
+      continue;
+    }
+    const { tokens, hasExp, decomposition, modelLineIdx, usedLines } = extractAuxTokensFromText(text, model);
+    if (Array.isArray(decomposition)) decompositionLogs.push(...decomposition.map(d => `${label}: ${d}`));
+    if (hasExp) expDetected = true;
+    if (typeof modelLineIdx === 'number' && modelLineIdx >= 0) {
+      modelLineInfos.push(`${label}: model line index ${modelLineIdx}`);
+      if (Array.isArray(usedLines) && usedLines.length) {
+        auxSources.push(`${label}: ` + usedLines.map(u => `#${u.index}(${u.line})`).join(', '));
+      }
+    }
+    for (const tok of tokens) {
+      const evalResult = evaluateAuxToken(tok);
+      if (evalResult.exclude) {
+        excluded.push(`${tok.raw || tok.value} (${label}): ${evalResult.reason}`);
+        continue;
+      }
+
+      const key = tok.value;
+      if (!auxMap.has(key)) {
+        auxMap.set(key, {
+          value: tok.raw || tok.value,
+          canon: key,
+          count: 0,
+          bestScore: evalResult.score,
+          relation: tok.relation,
+          sources: new Set(),
+        });
+      }
+      const entry = auxMap.get(key);
+      entry.count += 1;
+      entry.bestScore = Math.max(entry.bestScore, evalResult.score);
+      entry.sources.add(label + (tok.relation ? ` (${tok.relation})` : ''));
+    }
+  }
+
+  const ranked = Array.from(auxMap.values()).map(entry => {
+    const finalScore = entry.bestScore + entry.count * 2;
+    return { ...entry, finalScore, sources: Array.from(entry.sources) };
+  }).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return b.finalScore - a.finalScore;
+  });
+
+  const selected = ranked.slice(0, 2);
+  const aux = selected.map(t => t.value);
+  const debug = {
+    selected: selected.map(t => `${t.value} (score ${t.finalScore}, source: ${t.sources.join(', ') || 'N/A'})`),
+    excluded,
+    decomposition: decompositionLogs,
+    expDetected,
+    modelLines: modelLineInfos,
+    sourceLines: auxSources,
+    counts: ranked.map(r => `${r.value}: ${r.count}회 (score ${r.finalScore})`)
+  };
+
+  return { aux, expDetected, sources: selected.flatMap(s => s.sources), debug };
+}
+
+const STRICT_MODEL_REGEX = /^[A-Z]{1,3}-[A-Z0-9]{2,6}-[A-Z0-9]{2,6}$/;
+const MODEL_PREFIX_BONUS = /^(AN|AS|DN|DS|AH|DH)/;
+
+function normalizeModelCandidate(s) {
+  return (s || '')
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .trim();
+}
+
+function collectModelCandidates(rawText, label, pool) {
+  if (!rawText) return;
+  const lines = (rawText || '')
+    .split(/\r?\n/)
+    .map(normalizeModelCandidate)
+    .filter(Boolean);
+
+  const register = (cand) => {
+    const model = normalizeModelCandidate(cand);
+    const hyphenCount = (model.match(/-/g) || []).length;
+    const hasAlpha = /[A-Z]/.test(model);
+    const hasDigit = /\d/.test(model);
+    if (hyphenCount < 2) return;
+    if (!hasAlpha || !hasDigit) return;
+
+    if (!pool.has(model)) {
+      pool.set(model, {
+        candidate: model,
+        count: 0,
+        strictHits: 0,
+        numericOnly: /^[0-9-]+$/.test(model) && !hasAlpha,
+        prefixBonus: MODEL_PREFIX_BONUS.test(model),
+        hyphenCount,
+        sources: [],
+        contexts: []
+      });
+    }
+    const entry = pool.get(model);
+    entry.count += 1;
+    if (STRICT_MODEL_REGEX.test(model)) entry.strictHits += 1;
+    if (!entry.sources.includes(label)) entry.sources.push(label);
+    entry.contexts.push({ label, text: rawText });
+  };
+
+  for (const ln of lines) {
+    const canonLine = normalizeModelCandidate(ln);
+    register(canonLine);
+    const tokens = canonLine.split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      register(tok);
+    }
+  }
+}
+
+function pickBestModelCandidate(pool) {
+  const list = Array.from(pool.values());
+  const scored = list.map(entry => {
+    const coreLen = entry.candidate.replace(/-/g, '').length;
+    let score = 0;
+    if (entry.strictHits > 0) score += 20;
+    if (entry.numericOnly) score -= 15;
+    if (entry.prefixBonus) score += 4;
+    if (entry.hyphenCount >= 2) score += 5;
+    if (/[A-Z]/.test(entry.candidate) && /\d/.test(entry.candidate)) score += 5;
+    score += Math.max(0, 12 - Math.abs(coreLen - 10));
+    score += Math.max(0, entry.count - 1) * 3;
+    entry.score = score;
+    return { ...entry, score };
+  });
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.strictHits !== a.strictHits) return b.strictHits - a.strictHits;
+    return b.count - a.count;
+  });
+
+  return scored[0] || null;
+}
+
+// iOS Safari에서 메모리 부족으로 워커가 중단되는 문제를 줄이기 위해
+// 업로드 이미지를 적당히 리사이즈해서 전달한다.
+async function prepareImage(file) {
+  if (!file) return null;
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('이미지 로드 실패'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    el.src = dataUrl;
+  });
+
+  const maxSide = 2000;
+  const needResize = Math.max(img.width, img.height) > maxSide;
+  if (!needResize) return file;
+
+  const scale = maxSide / Math.max(img.width, img.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('이미지 변환 실패')), 'image/jpeg', 0.92);
+  });
+  return blob;
+}
+
+function renderOcrRaw(text) {
+  const rawArea = document.getElementById('ocrRawText');
+  const toggle = document.getElementById('showRawOcr');
+  console.log('[OCR raw]', text);
+  if (!rawArea) return;
+  if (toggle && !toggle.checked) {
+    rawArea.style.display = 'none';
+    return;
+  }
+  rawArea.style.display = 'block';
+  rawArea.value = (text || '').trim();
+}
+
+const roiState = {
+  img: null,
+  dataUrl: '',
+  naturalWidth: 0,
+  naturalHeight: 0,
+  scale: 1,
+  roi: null,
+  canvas: null,
+  ctx: null
+};
+
+function updateRoiInfo(text) {
+  const info = document.getElementById('roiInfo');
+  if (!info) return;
+  info.textContent = text || '';
+}
+
+function toggleRoiBox(show) {
+  const box = document.getElementById('roiBox');
+  if (box) box.style.display = show ? 'block' : 'none';
+}
+
+async function loadPreviewImage(file) {
+  if (!file) return;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('이미지 로드 실패'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    el.src = dataUrl;
+  });
+
+  const canvas = document.getElementById('roiCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const scale = Math.min(1, MAX_PREVIEW_WIDTH / img.width, MAX_PREVIEW_HEIGHT / img.height);
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  canvas.width = w;
+  canvas.height = h;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+
+  roiState.img = img;
+  roiState.dataUrl = dataUrl;
+  roiState.naturalWidth = img.width;
+  roiState.naturalHeight = img.height;
+  roiState.scale = scale || 1;
+  roiState.canvas = canvas;
+  roiState.ctx = ctx;
+  roiState.roi = null;
+  updateRoiInfo('ROI 미선택');
+  toggleRoiBox(true);
+}
+
+function redrawRoiOverlay() {
+  const { canvas, ctx, img, roi, scale } = roiState;
+  if (!canvas || !ctx || !img) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  if (roi && roi.width > 2 && roi.height > 2) {
+    ctx.strokeStyle = '#2563eb';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(roi.x, roi.y, roi.width, roi.height);
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.15)';
+    ctx.fillRect(roi.x, roi.y, roi.width, roi.height);
+    const ox = Math.round(roi.x / (scale || 1));
+    const oy = Math.round(roi.y / (scale || 1));
+    const ow = Math.round(roi.width / (scale || 1));
+    const oh = Math.round(roi.height / (scale || 1));
+    updateRoiInfo(`ROI: x=${ox}, y=${oy}, w=${ow}, h=${oh}`);
+  }
+}
+
+function attachRoiCanvas() {
+  const canvas = document.getElementById('roiCanvas');
+  if (!canvas) return;
+  let dragging = false;
+  let start = { x: 0, y: 0 };
+
+  const pos = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((e.clientX || (e.touches && e.touches[0]?.clientX)) - rect.left) * (canvas.width / rect.width);
+    const y = ((e.clientY || (e.touches && e.touches[0]?.clientY)) - rect.top) * (canvas.height / rect.height);
+    return { x: Math.max(0, Math.min(canvas.width, x)), y: Math.max(0, Math.min(canvas.height, y)) };
+  };
+
+  const endDrag = () => { dragging = false; };
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!roiState.img) return;
+    e.preventDefault();
+    dragging = true;
+    start = pos(e);
+    roiState.roi = { x: start.x, y: start.y, width: 0, height: 0 };
+    redrawRoiOverlay();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging || !roiState.img) return;
+    e.preventDefault();
+    const p = pos(e);
+    const x = Math.min(start.x, p.x);
+    const y = Math.min(start.y, p.y);
+    const w = Math.abs(p.x - start.x);
+    const h = Math.abs(p.y - start.y);
+    roiState.roi = { x, y, width: w, height: h };
+    redrawRoiOverlay();
+  });
+
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => {
+    canvas.addEventListener(ev, endDrag);
+  });
+}
+
+function resetRoi() {
+  roiState.roi = null;
+  redrawRoiOverlay();
+  updateRoiInfo('ROI 미선택');
+}
+
+async function cropRoiToBlob(file) {
+  const { roi, img, scale } = roiState;
+  if (!roi || !img || roi.width < 4 || roi.height < 4) return null;
+  const realScale = scale || 1;
+  const sx = roi.x / realScale;
+  const sy = roi.y / realScale;
+  const sw = roi.width / realScale;
+  const sh = roi.height / realScale;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(sw));
+  canvas.height = Math.max(1, Math.round(sh));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  return preprocessCroppedCanvas(canvas);
+}
+
 const attachOCR = () => {
   const btn = document.getElementById('ocrBtn');
   if (!btn) return;
@@ -1395,62 +2171,296 @@ const attachOCR = () => {
   const fresh = btn.cloneNode(true);
   btn.parentNode.replaceChild(fresh, btn);
 
+  const fi = document.getElementById('imgInput');
+  const roiToggle = document.getElementById('roiToggle');
+  const roiResetBtn = document.getElementById('roiResetBtn');
+  attachRoiCanvas();
+
+  let activeFile = null;
+
+  if (roiResetBtn) {
+    roiResetBtn.addEventListener('click', () => {
+      resetRoi();
+      if (roiToggle) roiToggle.checked = false;
+    });
+  }
+
+  if (fi) {
+    fi.addEventListener('change', async () => {
+      if (!fi.files?.length) { toggleRoiBox(false); return; }
+      try {
+        const prepared = await prepareImage(fi.files[0]);
+        activeFile = prepared || fi.files[0];
+        await loadPreviewImage(activeFile);
+        resetRoi();
+      } catch (e) {
+        console.error(e);
+        showErr('이미지 미리보기 로드 실패: ' + (e.message || e));
+      }
+    });
+  }
+
   fresh.addEventListener('click', async () => {
     clearErr();
-    try {
-      const fi = document.getElementById('imgInput');
-      if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
+    const origLabel = fresh.textContent;
+    const setBusy = (busy, label = '인식 중...') => {
+      fresh.disabled = busy;
+      fresh.textContent = busy ? label : origLabel;
+    };
 
-      const T = await ensureTesseract();
+    if (!fi?.files?.length || !activeFile) { alert('이미지를 선택해주세요.'); return; }
 
-      // 환경 감지
-      const isIOSWebKit =
-        /AppleWebKit/.test(navigator.userAgent) &&
-        (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+    // 환경 감지
+    const isIOSWebKit =
+      /AppleWebKit/.test(navigator.userAgent) &&
+      (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 
-      // iOS는 blob 워커 OFF, 그 외(file:// 포함)는 ON
-      const useBlobWorker = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    // iOS Edge/Safari에서 외부 워커가 막힐 경우를 대비해 blob/외부 워커 2단계로 시도
+    const primaryBlob = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    const attempts = [];
+    attempts.push(primaryBlob);
+    if (!attempts.includes(!primaryBlob)) attempts.push(!primaryBlob);
 
-      // v5: 언어는 첫 인자, 옵션은 세 번째 인자
-      const worker = await T.createWorker(
-  'eng+kor',
-  undefined,
-  {
-    // 워커/코어는 같은 CDN + 같은 버전으로 고정
-    workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-    corePath:   'https://unpkg.com/tesseract.js-core@5.1.0', // 폴더 경로
-    langPath:   'https://tessdata.projectnaptha.com/4.0.0',
-    workerBlobURL: useBlobWorker
-  }
-);
+    let lastErr = null;
+    let lastRawText = '';
+    const rawLogs = [];
+    const appendRawLog = (label, text) => {
+      const entry = `[${label}]\n${(text || '').trim()}`;
+      rawLogs.push(entry);
+      const combined = rawLogs.join('\n\n');
+      lastRawText = combined;
+      renderOcrRaw(combined);
+    };
 
+    const sourceImage = activeFile;
+    const cropCache = new Map();
+    const cropVariants = NAMEPLATE_TOP_RATIOS.map(ratio => ({
+      ratio,
+      label: `상단 ${Math.round(ratio * 100)}%`
+    }));
+    const psmModes = ['7', '6'];
+    const modelCandidates = new Map();
 
-      await worker.setParameters({
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-      });
+    const getCrop = async (ratio) => {
+      if (!cropCache.has(ratio)) {
+        cropCache.set(ratio, await cropTopRegion(sourceImage, ratio));
+      }
+      return cropCache.get(ratio);
+    };
 
-      const { data: { text } } = await worker.recognize(fi.files[0]);
-      await worker.terminate();
+    const performAutoOcr = async () => {
+      for (const useBlobWorker of attempts) {
+        let worker;
+        try {
+          setBusy(true, useBlobWorker ? '인식 중... (오프라인 워커)' : '인식 중... (온라인 워커)');
+          const T = await ensureTesseract();
+          worker = await withTimeout(
+            T.createWorker(
+              'eng',
+              undefined,
+              {
+                workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+                corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
+                langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+                workerBlobURL: useBlobWorker
+              }
+            ),
+            10000,
+            'OCR 워커 준비가 지연되고 있습니다. (네트워크 연결을 확인해주세요)'
+          );
 
-      const model = extractModel(text || '');
-      if (!model) { alert('형명 패턴을 못 찾았어. 사진을 더 정면/선명하게 찍어줘.'); return; }
+          for (const variant of cropVariants) {
+            const cropped = await getCrop(variant.ratio);
+            if (!cropped) continue;
 
-      document.getElementById('modelInput').value = model;
+            for (const mode of psmModes) {
+              await withTimeout(worker.setParameters({
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+                preserve_interword_spaces: '1',
+                user_defined_dpi: '300',
+                tessedit_pageseg_mode: mode,
+              }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM ${mode}, ${variant.label})`);
+
+              const { data: { text } } = await withTimeout(
+                worker.recognize(cropped),
+                15000,
+                `이미지 인식이 오래 걸립니다. (${variant.label}, PSM ${mode}) 사진 해상도를 낮추거나 네트워크 상태를 확인해주세요.`
+              );
+
+              const rawText = text || '';
+              const attemptLabel = `${variant.label}, PSM ${mode}`;
+              appendRawLog(attemptLabel, rawText);
+              collectModelCandidates(rawText, attemptLabel, modelCandidates);
+            }
+          }
+        } catch (e) {
+          lastErr = e;
+          console.error('OCR 실패, useBlobWorker=', useBlobWorker, e);
+        } finally {
+          setBusy(false);
+          try { await worker?.terminate(); } catch (_) {}
+        }
+      }
+    };
+
+    const performRoiOcr = async () => {
+      const roiBlob = await cropRoiToBlob(sourceImage);
+      if (!roiBlob) {
+        alert('ROI를 먼저 드래그로 지정해주세요.');
+        return false;
+      }
+      const roiLabel = roiState.roi ? `ROI ${Math.round(roiState.roi.width)}x${Math.round(roiState.roi.height)}` : 'ROI';
+      for (const useBlobWorker of attempts) {
+        const roiPool = new Map();
+        const roiContexts = [];
+        let worker;
+        try {
+          setBusy(true, useBlobWorker ? 'ROI 인식 중... (오프라인)' : 'ROI 인식 중... (온라인)');
+          const T = await ensureTesseract();
+          worker = await withTimeout(
+            T.createWorker(
+              'eng',
+              undefined,
+              {
+                workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+                corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
+                langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+                workerBlobURL: useBlobWorker
+              }
+            ),
+            10000,
+            'OCR 워커 준비가 지연되고 있습니다. (ROI 모드)'
+          );
+
+          for (const mode of ['7', '6']) {
+            await withTimeout(worker.setParameters({
+              tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+              preserve_interword_spaces: '1',
+              user_defined_dpi: '300',
+              tessedit_pageseg_mode: mode,
+            }), 8000, `ROI OCR 파라미터 설정 지연 (PSM ${mode})`);
+
+            const { data: { text } } = await withTimeout(
+              worker.recognize(roiBlob),
+              12000,
+              `ROI 인식 지연 (PSM ${mode})`
+            );
+
+            const rawText = text || '';
+            const label = `${roiLabel}, PSM ${mode}`;
+            appendRawLog(label, rawText);
+            collectModelCandidates(rawText, label, roiPool);
+            roiContexts.push({ label, text: rawText });
+          }
+
+          const best = pickBestModelCandidate(roiPool);
+          if (best && STRICT_MODEL_REGEX.test(best.candidate)) {
+            const auxResult = gatherAuxFromContexts(best.candidate, roiContexts);
+            const parts = [best.candidate];
+            if (auxResult.aux.length) parts.push(...auxResult.aux);
+            if (auxResult.expDetected) parts.push('EXP');
+
+            const combined = parts.join(' ').trim();
+            const corrected = applyContextualOZeroFix(combined, 'ROI 최종 보정');
+            document.getElementById('modelInput').value = corrected;
+            decode();
+
+            const sourceList = (best.sources || []).join(', ');
+            const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
+              `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+              `발견 위치: ${sourceList || 'N/A'}`;
+            const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+              `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+              `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+              `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+              `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
+              `선택된 aux: ${(auxResult.debug.selected || []).join(' | ') || '없음'}\n` +
+              `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
+              `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
+              `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
+            appendRawLog('선택된 aux/EXP (ROI)', auxDetail);
+            appendRawLog('ROI 모델 선택', debugSummary);
+            appendRawLog('ROI 최종 선택', `${corrected}\n출처: ${sourceList || 'N/A'}`);
+            return true;
+          }
+        } catch (e) {
+          lastErr = e;
+          console.error('ROI OCR 실패, useBlobWorker=', useBlobWorker, e);
+        } finally {
+          setBusy(false);
+          try { await worker?.terminate(); } catch (_) {}
+        }
+      }
+      return false;
+    };
+
+    const useRoi = roiToggle?.checked && roiState.roi && roiState.roi.width > 4 && roiState.roi.height > 4;
+
+    if (useRoi) {
+      const success = await performRoiOcr();
+      if (success) return;
+      showErr('ROI 인식 실패: 형명 패턴을 찾지 못했습니다. 선택 영역을 조정한 뒤 다시 시도해주세요.');
+      return;
+    }
+
+    await performAutoOcr();
+
+    const best = pickBestModelCandidate(modelCandidates);
+    if (best) {
+      const contextsForBest = Array.isArray(best.contexts) ? best.contexts : [];
+      const auxResult = gatherAuxFromContexts(best.candidate, contextsForBest);
+      const parts = [best.candidate];
+      if (auxResult.aux.length) parts.push(...auxResult.aux);
+      if (auxResult.expDetected) parts.push('EXP');
+
+      const combined = parts.join(' ').trim();
+      const corrected = applyContextualOZeroFix(combined, '자동 최종 보정');
+      document.getElementById('modelInput').value = corrected;
       decode();
-    } catch (e) {
-  const msg =
-    (e && e.message) ||
-    (e && e.reason && String(e.reason)) ||
-    (e && e.type) ||
-    (e && e.target && e.target.src && ('load fail: ' + e.target.src)) ||
-    String(e);
-  showErr('OCR 실패: ' + msg);
-}
 
-  });
-};
+      const sourceList = (best.sources || []).join(', ');
+      const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
+        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+        `발견 위치: ${sourceList || 'N/A'}`;
+      const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+        `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+        `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+        `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+        `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
+        `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
+        `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
+        `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
+        `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
+      appendRawLog('선택된 aux/EXP', auxDetail);
+      appendRawLog('최종 선택', debugSummary);
+      return;
+    }
+
+    if (lastRawText) {
+      const candidateList = Array.from(modelCandidates.values())
+        .map(c => `${c.candidate} (점수 ${c.score || 0}, 횟수 ${c.count}, 위치 ${c.sources.join(', ') || 'N/A'})`)
+        .join('\n');
+      if (candidateList) appendRawLog('형명 후보 목록', candidateList);
+      renderOcrRaw(lastRawText);
+      toggleRoiBox(true);
+      if (roiToggle) roiToggle.checked = true;
+      showErr('자동 인식 실패. 아래 이미지에서 형명 줄을 박스로 드래그해서 선택 후 다시 OCR 하세요.');
+      return;
+    }
+
+    // 여기까지 오면 모든 시도가 실패한 것
+    const msg =
+      (lastErr && lastErr.message) ||
+      (lastErr && lastErr.reason && String(lastErr.reason)) ||
+      (lastErr && lastErr.type) ||
+      (lastErr && lastErr.target && lastErr.target.src && ('load fail: ' + lastErr.target.src)) ||
+      '알 수 없는 오류';
+    toggleRoiBox(true);
+    if (roiToggle) roiToggle.checked = true;
+    showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, ROI로 형명 줄을 지정해 다시 시도해주세요.)');
+
+    });
+  };
 
 // DOM 뒤에 붙도록 보강
 if (document.readyState === 'loading') {
