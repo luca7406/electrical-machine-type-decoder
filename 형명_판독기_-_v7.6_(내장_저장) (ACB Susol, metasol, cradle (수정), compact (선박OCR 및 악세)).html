@@ -1585,11 +1585,11 @@ function extractNameplateModelOnly(text) {
   return best;
 }
 
-function extractNameplateModelPlusCodes(text) {
+function extractNameplateModelPlusCodes(text, forcedModel = null) {
   const norm = normalizeNameplateText(text || '');
   if (!norm) return null;
 
-  const model = extractNameplateModelOnly(text || '');
+  const model = forcedModel || extractNameplateModelOnly(text || '');
   if (!model) return null;
 
   const rawLines = (text || '').toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
@@ -1656,6 +1656,87 @@ function extractNameplateModelPlusCodes(text) {
   if (hasExp) parts.push('EXP');
 
   return parts.join(' ');
+}
+
+const STRICT_MODEL_REGEX = /^[A-Z]{1,3}-[A-Z0-9]{2,6}-[A-Z0-9]{2,6}$/;
+const MODEL_PREFIX_BONUS = /^(AN|AS|DN|DS|AH|DH)/;
+
+function normalizeModelCandidate(s) {
+  return (s || '')
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .trim();
+}
+
+function collectModelCandidates(rawText, label, pool) {
+  if (!rawText) return;
+  const lines = (rawText || '')
+    .split(/\r?\n/)
+    .map(normalizeModelCandidate)
+    .filter(Boolean);
+
+  const register = (cand) => {
+    const model = normalizeModelCandidate(cand);
+    const hyphenCount = (model.match(/-/g) || []).length;
+    const hasAlpha = /[A-Z]/.test(model);
+    const hasDigit = /\d/.test(model);
+    if (hyphenCount < 2) return;
+    if (!hasAlpha || !hasDigit) return;
+
+    if (!pool.has(model)) {
+      pool.set(model, {
+        candidate: model,
+        count: 0,
+        strictHits: 0,
+        numericOnly: /^[0-9-]+$/.test(model) && !hasAlpha,
+        prefixBonus: MODEL_PREFIX_BONUS.test(model),
+        hyphenCount,
+        sources: [],
+        contexts: []
+      });
+    }
+    const entry = pool.get(model);
+    entry.count += 1;
+    if (STRICT_MODEL_REGEX.test(model)) entry.strictHits += 1;
+    if (!entry.sources.includes(label)) entry.sources.push(label);
+    entry.contexts.push({ label, text: rawText });
+  };
+
+  for (const ln of lines) {
+    const canonLine = normalizeModelCandidate(ln);
+    register(canonLine);
+    const tokens = canonLine.split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      register(tok);
+    }
+  }
+}
+
+function pickBestModelCandidate(pool) {
+  const list = Array.from(pool.values());
+  const scored = list.map(entry => {
+    const coreLen = entry.candidate.replace(/-/g, '').length;
+    let score = 0;
+    if (entry.strictHits > 0) score += 20;
+    if (entry.numericOnly) score -= 15;
+    if (entry.prefixBonus) score += 4;
+    if (entry.hyphenCount >= 2) score += 5;
+    if (/[A-Z]/.test(entry.candidate) && /\d/.test(entry.candidate)) score += 5;
+    score += Math.max(0, 12 - Math.abs(coreLen - 10));
+    score += Math.max(0, entry.count - 1) * 3;
+    entry.score = score;
+    return { ...entry, score };
+  });
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.strictHits !== a.strictHits) return b.strictHits - a.strictHits;
+    return b.count - a.count;
+  });
+
+  return scored[0] || null;
 }
 
 // iOS Safari에서 메모리 부족으로 워커가 중단되는 문제를 줄이기 위해
@@ -1754,6 +1835,7 @@ const attachOCR = () => {
       label: `상단 ${Math.round(ratio * 100)}%`
     }));
     const psmModes = ['7', '6'];
+    const modelCandidates = new Map();
 
     const getCrop = async (ratio) => {
       if (!cropCache.has(ratio)) {
@@ -1801,14 +1883,9 @@ const attachOCR = () => {
             );
 
             const rawText = text || '';
-            appendRawLog(`${variant.label}, PSM ${mode}`, rawText);
-
-            const model = extractNameplateModelPlusCodes(rawText);
-            if (model) {
-              document.getElementById('modelInput').value = model;
-              decode();
-              return; // 성공했으니 반복 종료
-            }
+            const attemptLabel = `${variant.label}, PSM ${mode}`;
+            appendRawLog(attemptLabel, rawText);
+            collectModelCandidates(rawText, attemptLabel, modelCandidates);
           }
         }
       } catch (e) {
@@ -1820,7 +1897,26 @@ const attachOCR = () => {
       }
     }
 
+    const best = pickBestModelCandidate(modelCandidates);
+    if (best) {
+      const contextText = (best.contexts && best.contexts[0] && best.contexts[0].text) || lastRawText;
+      const combined = extractNameplateModelPlusCodes(contextText, best.candidate) || best.candidate;
+      document.getElementById('modelInput').value = combined;
+      decode();
+
+      const sourceList = (best.sources || []).join(', ');
+      const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
+        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+        `발견 위치: ${sourceList || 'N/A'}`;
+      appendRawLog('최종 선택', debugSummary);
+      return;
+    }
+
     if (lastRawText) {
+      const candidateList = Array.from(modelCandidates.values())
+        .map(c => `${c.candidate} (점수 ${c.score || 0}, 횟수 ${c.count}, 위치 ${c.sources.join(', ') || 'N/A'})`)
+        .join('\n');
+      if (candidateList) appendRawLog('형명 후보 목록', candidateList);
       renderOcrRaw(lastRawText);
       showErr('형명 패턴을 찾지 못했습니다. OCR 원문을 확인한 뒤 직접 입력해주세요.');
       return;
