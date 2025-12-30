@@ -1446,6 +1446,7 @@ async function withTimeout(promise, ms, label) {
 
 const NAMEPLATE_TOP_RATIO_PRIMARY = 0.45;
 const NAMEPLATE_TOP_RATIO_SECONDARY = 0.55;
+const NAMEPLATE_TOP_RATIOS = [0.45, 0.55, 0.7, 0.85, 1.0];
 const OCR_UPSCALE_FACTOR = 2;
 const OCR_CONTRAST_BOOST = 1.6;
 const OCR_THRESHOLD = 170;
@@ -1737,13 +1738,21 @@ const attachOCR = () => {
 
     let lastErr = null;
     let lastRawText = '';
+    const rawLogs = [];
+    const appendRawLog = (label, text) => {
+      const entry = `[${label}]\n${(text || '').trim()}`;
+      rawLogs.push(entry);
+      const combined = rawLogs.join('\n\n');
+      lastRawText = combined;
+      renderOcrRaw(combined);
+    };
     const resized = await prepareImage(fi.files[0]);
     const sourceImage = resized || fi.files[0];
     const cropCache = new Map();
-    const cropVariants = [
-      { ratio: NAMEPLATE_TOP_RATIO_PRIMARY, label: '상단 45%' },
-      { ratio: NAMEPLATE_TOP_RATIO_SECONDARY, label: '상단 55%' }
-    ];
+    const cropVariants = NAMEPLATE_TOP_RATIOS.map(ratio => ({
+      ratio,
+      label: `상단 ${Math.round(ratio * 100)}%`
+    }));
     const psmModes = ['7', '6'];
 
     const getCrop = async (ratio) => {
@@ -1775,6 +1784,7 @@ const attachOCR = () => {
 
         for (const variant of cropVariants) {
           const cropped = await getCrop(variant.ratio);
+          if (!cropped) continue;
 
           for (const mode of psmModes) {
             await withTimeout(worker.setParameters({
@@ -1791,8 +1801,7 @@ const attachOCR = () => {
             );
 
             const rawText = text || '';
-            renderOcrRaw(rawText);
-            lastRawText = rawText;
+            appendRawLog(`${variant.label}, PSM ${mode}`, rawText);
 
             const model = extractNameplateModelPlusCodes(rawText);
             if (model) {
