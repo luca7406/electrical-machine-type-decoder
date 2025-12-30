@@ -30,13 +30,16 @@
   .slot-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
   .slot-box{flex:1;min-width:140px}
   #err{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#fee2e2;border:1px solid #fecaca;color:#7f1d1d}
+  #roiBox{display:none;border:1px dashed #94a3b8;border-radius:10px;padding:8px;background:#f8fafc}
+  #roiCanvas{border:1px solid #cbd5e1;border-radius:8px;max-width:100%;touch-action:none}
+  #roiOverlayHint{font-size:.85rem;color:#334155;margin-top:4px}
   @media (max-width:640px){
     .flex{flex-direction:column}
     .card{flex:1 1 100%}
     .row{flex-direction:column}
   }
 </style>
-<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
 <!-- 설정 JSON: 이 블록이 ‘저장’으로 갱신됩니다 -->
@@ -991,6 +994,27 @@
         <button id="ocrBtn">이미지에서 텍스트 읽기</button>
       </div>
 
+      <div id="roiBox" class="stack">
+        <div class="row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+          <label class="row" style="align-items:center;gap:6px;margin:0;">
+            <input type="checkbox" id="roiToggle">
+            <span>ROI 수동 선택 모드</span>
+          </label>
+          <button id="roiResetBtn" type="button">ROI 리셋</button>
+          <span class="small" id="roiInfo"></span>
+        </div>
+        <canvas id="roiCanvas" width="1" height="1"></canvas>
+        <div id="roiOverlayHint">이미지를 업로드한 뒤, 형명 줄을 마우스로 드래그하여 선택하세요.</div>
+      </div>
+
+      <div class="stack" style="margin-top:6px">
+        <label class="row" style="align-items:center;gap:6px;">
+          <input type="checkbox" id="showRawOcr" checked>
+          <span>OCR 원문 표시 (디버그)</span>
+        </label>
+        <textarea id="ocrRawText" rows="4" readonly style="display:block;min-height:90px" placeholder="OCR 원문이 여기에 표시됩니다"></textarea>
+      </div>
+
       <div class="row">
         <button id="decodeBtn">판독</button>
         <button id="toggleSettingsBtn">⚙️ 설정</button>
@@ -1382,6 +1406,7 @@ function extractModel(text) {
   }
 
   cands = [...new Set(cands)];
+  cands = cands.filter(s => s.includes('-'));
   if (!cands.length) return null;
 
   // 점수: 하이픈 2개 선호, 숫자 2개 이상, 길이 적당(8~20), A로 시작 선호
@@ -1395,7 +1420,11 @@ function extractModel(text) {
     return sc;
   };
   cands.sort((a, b) => score(b) - score(a));
-  return cands[0];
+  const best = cands[0] || null;
+  if (!best) return null;
+  if (!/-/.test(best)) return null;
+  if (!/^[A-Z0-9-]{6,}$/.test(best)) return null;
+  return best;
 }
 
   // ---- OCR 핸들러 교체 시작 ----
@@ -1571,6 +1600,35 @@ const attachOCR = () => {
   const fresh = btn.cloneNode(true);
   btn.parentNode.replaceChild(fresh, btn);
 
+  const fi = document.getElementById('imgInput');
+  const roiToggle = document.getElementById('roiToggle');
+  const roiResetBtn = document.getElementById('roiResetBtn');
+  attachRoiCanvas();
+
+  let activeFile = null;
+
+  if (roiResetBtn) {
+    roiResetBtn.addEventListener('click', () => {
+      resetRoi();
+      if (roiToggle) roiToggle.checked = false;
+    });
+  }
+
+  if (fi) {
+    fi.addEventListener('change', async () => {
+      if (!fi.files?.length) { toggleRoiBox(false); return; }
+      try {
+        const prepared = await prepareImage(fi.files[0]);
+        activeFile = prepared || fi.files[0];
+        await loadPreviewImage(activeFile);
+        resetRoi();
+      } catch (e) {
+        console.error(e);
+        showErr('이미지 미리보기 로드 실패: ' + (e.message || e));
+      }
+    });
+  }
+
   fresh.addEventListener('click', async () => {
     clearErr();
     const origLabel = fresh.textContent;
@@ -1684,8 +1742,49 @@ const attachOCR = () => {
       '알 수 없는 오류';
     showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, 이미지 해상도를 더 낮춰 다시 시도해주세요.)');
 
-  });
-};
+      const sourceList = (best.sources || []).join(', ');
+      const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
+        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+        `발견 위치: ${sourceList || 'N/A'}`;
+      const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+        `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+        `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+        `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+        `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
+        `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
+        `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
+        `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
+        `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
+      appendRawLog('선택된 aux/EXP', auxDetail);
+      appendRawLog('최종 선택', debugSummary);
+      return;
+    }
+
+    if (lastRawText) {
+      const candidateList = Array.from(modelCandidates.values())
+        .map(c => `${c.candidate} (점수 ${c.score || 0}, 횟수 ${c.count}, 위치 ${c.sources.join(', ') || 'N/A'})`)
+        .join('\n');
+      if (candidateList) appendRawLog('형명 후보 목록', candidateList);
+      renderOcrRaw(lastRawText);
+      toggleRoiBox(true);
+      if (roiToggle) roiToggle.checked = true;
+      showErr('자동 인식 실패. 아래 이미지에서 형명 줄을 박스로 드래그해서 선택 후 다시 OCR 하세요.');
+      return;
+    }
+
+    // 여기까지 오면 모든 시도가 실패한 것
+    const msg =
+      (lastErr && lastErr.message) ||
+      (lastErr && lastErr.reason && String(lastErr.reason)) ||
+      (lastErr && lastErr.type) ||
+      (lastErr && lastErr.target && lastErr.target.src && ('load fail: ' + lastErr.target.src)) ||
+      '알 수 없는 오류';
+    toggleRoiBox(true);
+    if (roiToggle) roiToggle.checked = true;
+    showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, ROI로 형명 줄을 지정해 다시 시도해주세요.)');
+
+    });
+  };
 
 // DOM 뒤에 붙도록 보강
 if (document.readyState === 'loading') {
