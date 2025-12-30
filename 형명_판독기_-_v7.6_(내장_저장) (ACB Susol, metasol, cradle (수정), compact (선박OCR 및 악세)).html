@@ -1231,6 +1231,7 @@
   function saveIntoFamilyDataScript(){
     try{
       stashEditsIntoMemory();
+      if(currentKey) selectFamily(currentKey);
       const el = document.getElementById('familyData');
       el.textContent = JSON.stringify(families, null, 2);
       // 포커스 잃지 않도록 안내만
