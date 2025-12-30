@@ -1463,54 +1463,83 @@ const attachOCR = () => {
 
   fresh.addEventListener('click', async () => {
     clearErr();
-    try {
-      const fi = document.getElementById('imgInput');
-      if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
+    const origLabel = fresh.textContent;
+    const setBusy = (busy, label = '인식 중...') => {
+      fresh.disabled = busy;
+      fresh.textContent = busy ? label : origLabel;
+    };
 
-      const T = await ensureTesseract();
+    const fi = document.getElementById('imgInput');
+    if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
 
-      // 환경 감지
-      const isIOSWebKit =
-        /AppleWebKit/.test(navigator.userAgent) &&
-        (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+    // 환경 감지
+    const isIOSWebKit =
+      /AppleWebKit/.test(navigator.userAgent) &&
+      (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 
-      // iOS는 blob 워커 OFF, 그 외(file:// 포함)는 ON
-      const useBlobWorker = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    // iOS Edge/Safari에서 외부 워커가 막힐 경우를 대비해 blob/외부 워커 2단계로 시도
+    const primaryBlob = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    const attempts = [];
+    attempts.push(primaryBlob);
+    if (!attempts.includes(!primaryBlob)) attempts.push(!primaryBlob);
 
-      const worker = await T.createWorker({
-        logger: m => console.log(m),
-        workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-        corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        workerBlobURL: useBlobWorker
-      });
+    let lastErr = null;
+    for (const useBlobWorker of attempts) {
+      let worker;
+      try {
+        setBusy(true, useBlobWorker ? '인식 중... (오프라인 워커)' : '인식 중... (온라인 워커)');
+        const T = await ensureTesseract();
+        worker = await T.createWorker({
+          logger: m => console.log(m),
+          workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+          corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+          workerBlobURL: useBlobWorker
+        });
 
-      await worker.loadLanguage('eng+kor');
-      await worker.initialize('eng+kor');
-      await worker.setParameters({
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-      });
+        await worker.loadLanguage('eng+kor');
+        await worker.initialize('eng+kor');
+        await worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+        });
 
-      const resized = await prepareImage(fi.files[0]);
-      const { data: { text } } = await worker.recognize(resized || fi.files[0]);
-      await worker.terminate();
+        const resized = await prepareImage(fi.files[0]);
+        const { data: { text } } = await worker.recognize(resized || fi.files[0]);
 
-      const model = extractModel(text || '');
-      if (!model) { alert('형명 패턴을 못 찾았어. 사진을 더 정면/선명하게 찍어줘.'); return; }
+        const plain = (text || '').replace(/\s+/g, ' ').trim();
+        const model = extractModel(text || '');
+        const fallback = plain.replace(/[^A-Za-z0-9-]+/g, '').toUpperCase();
 
-      document.getElementById('modelInput').value = model;
-      decode();
-    } catch (e) {
-  const msg =
-    (e && e.message) ||
-    (e && e.reason && String(e.reason)) ||
-    (e && e.type) ||
-    (e && e.target && e.target.src && ('load fail: ' + e.target.src)) ||
-    String(e);
-  showErr('OCR 실패: ' + msg);
-}
+        if (!model && !fallback) {
+          alert('형명 패턴을 못 찾았어. 사진을 더 정면/선명하게 찍어줘.');
+          return;
+        }
+
+        document.getElementById('modelInput').value = model || fallback;
+        if (!model && fallback) {
+          showErr('추출된 텍스트를 그대로 입력란에 채웠습니다. 필요하면 직접 수정해주세요.');
+        }
+        decode();
+        return; // 성공했으니 반복 종료
+      } catch (e) {
+        lastErr = e;
+        console.error('OCR 실패, useBlobWorker=', useBlobWorker, e);
+      } finally {
+        setBusy(false);
+        try { await worker?.terminate(); } catch (_) {}
+      }
+    }
+
+    // 여기까지 오면 모든 시도가 실패한 것
+    const msg =
+      (lastErr && lastErr.message) ||
+      (lastErr && lastErr.reason && String(lastErr.reason)) ||
+      (lastErr && lastErr.type) ||
+      (lastErr && lastErr.target && lastErr.target.src && ('load fail: ' + lastErr.target.src)) ||
+      '알 수 없는 오류';
+    showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, 이미지 해상도를 더 낮춰 다시 시도해주세요.)');
 
   });
 };
