@@ -3,6 +3,9 @@
 <meta charset="UTF-8">
 <title>형명 판독기 - v7.6 (내장 저장)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
 <link rel="preconnect" href="https://unpkg.com">
 <link rel="preconnect" href="https://tessdata.projectnaptha.com">
 <style>
@@ -30,10 +33,15 @@
   .slot-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
   .slot-box{flex:1;min-width:140px}
   #err{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#fee2e2;border:1px solid #fecaca;color:#7f1d1d}
+  .tip{background:#ecfeff;border:1px solid #bae6fd;color:#0f172a;border-radius:10px;padding:10px;margin-bottom:12px;font-size:.92rem}
+  .tip ul{margin:6px 0 0 16px;padding:0}
+  .tip li{margin:4px 0}
   @media (max-width:640px){
     .flex{flex-direction:column}
     .card{flex:1 1 100%}
     .row{flex-direction:column}
+    .row>*{width:100%}
+    button,input[type="file"]{width:100%}
   }
 </style>
 <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
@@ -978,6 +986,15 @@
 <h1>형명 판독기 (v7.6)</h1>
 <div id="err" style="display: none;"></div>
 
+<div class="tip">
+  <strong>iPhone Safari 사용 팁</strong>
+  <ul>
+    <li>Safari에서 직접 열거나, <em>공유 &gt; 파일에 저장</em> 후 파일 앱에서 여세요.</li>
+    <li>"이미지에서 텍스트 읽기" 버튼을 눌러 카메라/사진을 바로 불러올 수 있습니다.</li>
+    <li>설정/저장은 브라우저 안에서만 동작하며, 저장 버튼을 누르면 최신 상태로 HTML을 다시 내려받습니다.</li>
+  </ul>
+</div>
+
 <div class="flex">
   <!-- Left -->
   <div class="card">
@@ -987,7 +1004,7 @@
       <div class="small">앞 접두사(슬롯0) 기준 자동 인식</div>
 
       <div class="row">
-        <input type="file" accept="image/*" id="imgInput">
+        <input type="file" accept="image/*" capture="environment" id="imgInput">
         <button id="ocrBtn">이미지에서 텍스트 읽기</button>
       </div>
 
