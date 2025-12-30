@@ -1388,6 +1388,42 @@ async function ensureTesseract() {
   throw new Error('Tesseract 라이브러리 로드 실패');
 }
 
+// iOS Safari에서 메모리 부족으로 워커가 중단되는 문제를 줄이기 위해
+// 업로드 이미지를 적당히 리사이즈해서 전달한다.
+async function prepareImage(file) {
+  if (!file) return null;
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('이미지 로드 실패'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    el.src = dataUrl;
+  });
+
+  const maxSide = 2000;
+  const needResize = Math.max(img.width, img.height) > maxSide;
+  if (!needResize) return file;
+
+  const scale = maxSide / Math.max(img.width, img.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('이미지 변환 실패')), 'image/jpeg', 0.92);
+  });
+  return blob;
+}
+
 const attachOCR = () => {
   const btn = document.getElementById('ocrBtn');
   if (!btn) return;
@@ -1411,27 +1447,24 @@ const attachOCR = () => {
       // iOS는 blob 워커 OFF, 그 외(file:// 포함)는 ON
       const useBlobWorker = (location.protocol === 'file:') ? true : !isIOSWebKit;
 
-      // v5: 언어는 첫 인자, 옵션은 세 번째 인자
-      const worker = await T.createWorker(
-  'eng+kor',
-  undefined,
-  {
-    // 워커/코어는 같은 CDN + 같은 버전으로 고정
-    workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-    corePath:   'https://unpkg.com/tesseract.js-core@5.1.0', // 폴더 경로
-    langPath:   'https://tessdata.projectnaptha.com/4.0.0',
-    workerBlobURL: useBlobWorker
-  }
-);
+      const worker = await T.createWorker({
+        logger: m => console.log(m),
+        workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+        corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        workerBlobURL: useBlobWorker
+      });
 
-
+      await worker.loadLanguage('eng+kor');
+      await worker.initialize('eng+kor');
       await worker.setParameters({
         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
         preserve_interword_spaces: '1',
         user_defined_dpi: '300',
       });
 
-      const { data: { text } } = await worker.recognize(fi.files[0]);
+      const resized = await prepareImage(fi.files[0]);
+      const { data: { text } } = await worker.recognize(resized || fi.files[0]);
       await worker.terminate();
 
       const model = extractModel(text || '');
