@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="UTF-8">
+<title>형명 판독기 - v7.6 (내장 저장)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://unpkg.com">
+<link rel="preconnect" href="https://tessdata.projectnaptha.com">
+<style>
+  :root { --gap:12px; --card:#fff; --bd:#d1d5db; --txt:#1f1f3a; --mut:#555; --bg:#f5f5f7; }
+  * { box-sizing:border-box; }
+  body{font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:16px;line-height:1.4;background:var(--bg);color:var(--txt);}
+  h1{font-size:1.35rem;margin:0 0 8px;}
+  .flex{display:flex;gap:var(--gap);align-items:flex-start;flex-wrap:wrap;}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;box-shadow:0 2px 6px rgba(0,0,0,.05);min-width:280px;flex:1 1 320px;}
+  input,button,textarea{font-size:.95rem;border:1px solid #aaa;border-radius:8px;padding:8px;background:#fff}
+  button{cursor:pointer}
+  textarea{resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .small{font-size:.8rem;color:var(--mut);margin-top:4px}
+  .result{margin-top:12px;border:1px solid #cbd5e1;border-radius:10px;padding:10px;background:#fff;white-space:normal}
+  .result .table-container{overflow-x:auto}
+  .result table{width:100%;border-collapse:collapse;margin-top:6px}
+  .result th,.result td{border:1px solid #ddd;padding:8px;text-align:left}
+  .result th{background:#f0f0f0;font-weight:600}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .stack>*{display:block;width:100%;margin-top:6px}
+  .family-list button{width:calc(100% - 56px);margin:0 6px 6px 0}
+  .family-item{display:flex;align-items:center}
+  .del-btn{background:#fee2e2;border-color:#fecaca;color:#991b1b;padding:6px 10px;border-radius:8px}
+  .addline{display:flex;gap:8px;align-items:center;margin:6px 0}
+  .slot-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .slot-box{flex:1;min-width:140px}
+  #err{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#fee2e2;border:1px solid #fecaca;color:#7f1d1d}
+  @media (max-width:640px){
+    .flex{flex-direction:column}
+    .card{flex:1 1 100%}
+    .row{flex-direction:column}
+  }
+</style>
+<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<!-- 설정 JSON: 이 블록이 ‘저장’으로 갱신됩니다 -->
+<script id="familyData" type="application/json">{
+  "Susol": {
+    "display": "Susol ACB",
+    "storageKey": "Susol",
+    "slotLens": [
+      2,
+      2,
+      1,
+      1,
+      2,
+      1,
+      2,
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      2,
+      2
+    ],
+    "slotLabels": [
+      "고유형식",
+      "Ampere Frame",
+      "외형구분 및 상배열 구분",
+      "극수",
+      "정격전류",
+      "설치방식",
+      "모터전원",
+      "투입전원",
+      "트립전원",
+      "보조접점 및 Charge방식",
+      "Trip Relay type",
+      "통신(MODBUS) & 보호기능",
+      "제어전원 & 주파수",
+      "UVT",
+      "Option"
+    ],
+    "maps": [
+      {
+        "AH": "고차단형",
+        "DH": "Switch Disconnector"
+      },
+      {
+        "10": "1000AF",
+        "13": "1250AF",
+        "16": "1600AF",
+        "20": "2000AF",
+        "25": "2500AF",
+        "32": "3200AF",
+        "40": "4000AF",
+        "50": "5000AF",
+        "63": "6300AF",
+        "06": "630AF",
+        "08": "800AF"
+      },
+      {
+        "D": "630~2000AF 3P/4P 표준형 RST(N)",
+        "W": "630~2000AF 4P 역상형 (N)RST",
+        "E": "2000~4000AF 3P/4P 표준형 RST(N)",
+        "X": "2000~4000AF 4P 역상형 (N)RST",
+        "F": "4000/5000AF 3P/4P표준형 RST(N)",
+        "Y": "4000/5000AF 4P 역상형 (N)RST",
+        "G": "4000/5000/6300AF 3P/4P 표준형 RST(N)",
+        "Z": "4000/5000/6300AF 4P 역상형 (N)RST"
+      },
+      {
+        "3": "3극형(D,E,F,G type frame)",
+        "4": "4극형"
+      },
+      {
+        "10": "1000A",
+        "13": "1250A",
+        "16": "1600A",
+        "20": "2000A",
+        "25": "2500A",
+        "32": "3200A",
+        "40": "4000A",
+        "50": "5000A",
+        "63": "6300A",
+        "00": "Trip Relay & CT 없음",
+        "02": "200A",
+        "04": "400A",
+        "06": "630A",
+        "08": "800A"
+      },
+      {
+        "J": "인출형 수동접속",
+        "A": "인출형 자동접속",
+        "H": "고정형 상하 수평형",
+        "V": "고정형 상하 수직형",
+        "M": "고정형 상 수평형 하 수직형",
+        "N": "고정형 상 수직형 하 수평형",
+        "P": "고정형 상하 평면형"
+      },
+      {
+        "MA": "모터 N/A",
+        "M1": "AC/DC 100V~130V",
+        "M2": "AC/DC 200V~250V",
+        "M3": "DC 125V",
+        "M4": "DC 24V~30V",
+        "M5": "DC 48V~60V",
+        "M6": "AC 380V~415V",
+        "M7": "AC 440V~480V",
+        "M8": "AC 48V"
+      },
+      {
+        "D0": "투입코일 N/A",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "D0": "트립코일 N/A",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "AX": "표준형 OFF–Charge 3a3b",
+        "AC": "표준형 ON–Charge 3a3b",
+        "BX": "표준형 OFF–Charge 5a5b",
+        "BC": "표준형 ON–Charge 5a5b",
+        "HX 고용량 OFF–Charge 5a5b": "",
+        "HC": "고용량 ON–Charge 5a5b",
+        "CC": "표준형 ON–Charge 6a6b",
+        "JC": "고용량 ON–Charge 6a6b",
+        "GX": "고용량 OFF–Charge 3a3b",
+        "GC": "고용량 ON–Charge 3a3b",
+        "TX": "TCS OFF–Charge 4a4b",
+        "TC": "TCS ON–Charge 5a5b"
+      },
+      {
+        "0": "Trip Relay N/A",
+        "N": "Normal",
+        "A": "Ammeter",
+        "P": "Power meter",
+        "S": "Supreme meter"
+      },
+      {
+        "H": "L, S, I, G",
+        "D": "L, S, I, G + 통신",
+        "J": "L, S, I, Gext + 자사 공급 ZCT + 통신",
+        "Y": "L, S, I, Gext + 접지선 CT + 통신",
+        "O": "L, S, I, G + Neutral CT + 통신",
+        "S": "L,S,I,G + PTA (Pre trip alarm) +통신(기본)"
+      },
+      {
+        "0": "60Hz Self-Power N/A",
+        "1": "60Hz AC/DC 85V~264V N/A",
+        "2": "- DC 21V~54V N/A",
+        "3": "60Hz AC/DC 85V~264V Bluetooth",
+        "4": "- DC 21V~54V Bluetooth",
+        "5": "50Hz Self-Power N/A",
+        "6": "50Hz AC/DC 85V~264V N/A",
+        "7": "- DC 21V~54V N/A",
+        "8": "50Hz AC/DC 85V~264V Bluetooth",
+        "9": "- DC 21V~54V Bluetooth"
+      },
+      {
+        "U0": "UVT N/A",
+        "U1": "AC/DC 100V~130V",
+        "U2": "AC/DC 200V~250V",
+        "U3": "DC 125V",
+        "U4": "DC 24V~30V",
+        "U5": "DC 48V~60V",
+        "U6": "AC 380V~480V",
+        "U7": "AC 48V"
+      },
+      {}
+    ],
+    "optionMap": {
+      "AL": "알람접점 AL1 + 기계적리셋버튼 MRB",
+      "A1": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V)",
+      "A2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB",
+      "A3": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V)",
+      "A4": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V)",
+      "A5": "알람접점 AL1 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A7": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V) + AUTO RESET",
+      "A8": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V) + AUTO RESET",
+      "A9": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V) + AUTO RESET",
+      "Y2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(2b contact)",
+      "Y6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(2b contact)",
+      "Z2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(1a1b contact)",
+      "Z6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(1a1b contact)",
+      "C": "C Counter",
+      "S": "CS2 차지완료통신접점 (Charge switch communication)",
+      "B": "B 상시 Open형",
+      "B1": "B1 상시 Open형 S type",
+      "B2": "B2 상시 Close형",
+      "M": "MI 기계적 Interlock (Mechanical interlock)",
+      "D": "DI (Door Interlock) (Catcher type), MOC( Mechanism operated cell switch)",
+      "K": "K1 Key Lock",
+      "K2": "K2 Key Interlock Set",
+      "K3": "K3 Key Lock Double",
+      "R": "RCS 투입준비접점 (Ready to Close switch)",
+      "T": "TM 온도감시장치 (Temperature Monitoring)",
+      "H1": "SHT2 (보조트립코일) AC/DC 100~130V",
+      "H2": "SHT2 (보조트립코일) AC/DC 200~250V",
+      "H3": "SHT2 (보조트립코일) DC 125V",
+      "H4": "SHT2 (보조트립코일) DC 24~30V",
+      "H5": "SHT2 (보조트립코일) DC 48~60V",
+      "H6": "SHT2 (보조트립코일) AC 380~480V",
+      "H7": "SHT2 (보조트립코일) AC 48V",
+      "(-V)": "External외부 VDM",
+      "EXP": "수출용포장"
+    }
+  },
+  "Metasol": {
+    "display": "Metasol ACB",
+    "storageKey": "Metasol",
+    "slotLens": [
+      2,
+      2,
+      1,
+      1,
+      2,
+      1,
+      2,
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      2,
+      1
+    ],
+    "slotLabels": [
+      "고유형식",
+      "Ampere Frame",
+      "외형구분 및 상배열 구분",
+      "극수",
+      "정격전류",
+      "설치방식",
+      "모터전원",
+      "투입전원",
+      "트립전원",
+      "보조접점 및 Charge방식",
+      "Trip Relay type",
+      "통신(MODBUS) & 보호기능",
+      "제어전원 & 주파수",
+      "UVT",
+      "Option"
+    ],
+    "maps": [
+      {
+        "AN": "표준형",
+        "AS": "고차단형",
+        "DN": "Switch Disconnector",
+        "DS": "Switch Disconnector"
+      },
+      {
+        "10": "1000AF",
+        "13": "1250AF",
+        "16": "1600AF",
+        "20": "2000AF",
+        "25": "2500AF",
+        "32": "3200AF",
+        "40": "4000AF",
+        "50": "5000AF",
+        "63": "6300AF",
+        "06": "630AF",
+        "08": "800AF"
+      },
+      {
+        "D": "630~2000AF 3P/4P 표준형 RST(N)",
+        "W": "630~2000AF 4P 역상형 (N)RST",
+        "E": "2000~4000AF 3P/4P 표준형 RST(N)",
+        "X": "2000~4000AF 4P 역상형 (N)RST",
+        "F": "4000/5000AF 3P/4P표준형 RST(N)",
+        "Y": "4000/5000AF 4P 역상형 (N)RST",
+        "G": "4000/5000/6300AF 3P/4P 표준형 RST(N)",
+        "Z": "4000/5000/6300AF 4P 역상형 (N)RST"
+      },
+      {
+        "3": "3극형(D,E,F,G type frame)",
+        "4": "4극형"
+      },
+      {
+        "10": "1000A",
+        "13": "1250A",
+        "16": "1600A",
+        "20": "2000A",
+        "25": "2500A",
+        "32": "3200A",
+        "40": "4000A",
+        "50": "5000A",
+        "63": "6300A",
+        "00": "Trip Relay & CT 없음",
+        "02": "200A",
+        "04": "400A",
+        "06": "630A",
+        "08": "800A"
+      },
+      {
+        "J": "인출형 수동접속",
+        "A": "인출형 자동접속",
+        "H": "고정형 상하 수평형",
+        "V": "고정형 상하 수직형",
+        "M": "고정형 상 수평형 하 수직형",
+        "N": "고정형 상 수직형 하 수평형",
+        "P": "고정형 상하 평면형"
+      },
+      {
+        "MA": "모터 N/A",
+        "M1": "AC/DC 100V~130V",
+        "M2": "AC/DC 200V~250V",
+        "M3": "DC 125V",
+        "M4": "DC 24V~30V",
+        "M5": "DC 48V~60V",
+        "M6": "AC 380V~415V",
+        "M7": "AC 440V~480V",
+        "M8": "AC 48V"
+      },
+      {
+        "D0": "투입코일 N/A",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "D0": "트립코일 N/A",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "AX": "표준형 OFF–Charge 3a3b",
+        "AC": "표준형 ON–Charge 3a3b",
+        "BX": "표준형 OFF–Charge 5a5b",
+        "BC": "표준형 ON–Charge 5a5b",
+        "HX 고용량 OFF–Charge 5a5b": "",
+        "HC": "고용량 ON–Charge 5a5b",
+        "CC": "표준형 ON–Charge 6a6b",
+        "JC": "고용량 ON–Charge 6a6b",
+        "GX": "고용량 OFF–Charge 3a3b",
+        "GC": "고용량 ON–Charge 3a3b",
+        "TX": "TCS OFF–Charge 4a4b",
+        "TC": "TCS ON–Charge 5a5b"
+      },
+      {
+        "0": "Trip Relay N/A",
+        "N": "Normal",
+        "A": "Ammeter",
+        "P": "Power meter",
+        "S": "Supreme meter"
+      },
+      {
+        "H": "L, S, I, G",
+        "D": "L, S, I, G + 통신",
+        "J": "L, S, I, Gext + 자사 공급 ZCT + 통신",
+        "Y": "L, S, I, Gext + 접지선 CT + 통신",
+        "O": "L, S, I, G + Neutral CT + 통신"
+      },
+      {
+        "0": "60Hz Self-Power N/A",
+        "1": "60Hz AC/DC 85V~264V N/A",
+        "2": "- DC 21V~54V N/A",
+        "3": "60Hz AC/DC 85V~264V Bluetooth",
+        "4": "- DC 21V~54V Bluetooth",
+        "5": "50Hz Self-Power N/A",
+        "6": "50Hz AC/DC 85V~264V N/A",
+        "7": "- DC 21V~54V N/A",
+        "8": "50Hz AC/DC 85V~264V Bluetooth",
+        "9": "- DC 21V~54V Bluetooth"
+      },
+      {
+        "U0": "UVT N/A",
+        "U1": "AC/DC 100V~130V",
+        "U2": "AC/DC 200V~250V",
+        "U3": "DC 125V",
+        "U4": "DC 24V~30V",
+        "U5": "DC 48V~60V",
+        "U6": "AC 380V~480V",
+        "U7": "AC 48V"
+      },
+      {}
+    ],
+    "optionMap": {
+      "AL": "알람접점 AL1 + 기계적리셋버튼 MRB",
+      "A1": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V)",
+      "A2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB",
+      "A3": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V)",
+      "A4": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V)",
+      "A5": "알람접점 AL1 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A7": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V) + AUTO RESET",
+      "A8": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V) + AUTO RESET",
+      "A9": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V) + AUTO RESET",
+      "Y2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(2b contact)",
+      "Y6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(2b contact)",
+      "Z2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(1a1b contact)",
+      "Z6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(1a1b contact)",
+      "C": "C Counter",
+      "S": "CS2 차지완료통신접점 (Charge switch communication)",
+      "B": "B 상시 Open형",
+      "B1": "B1 상시 Open형 S type",
+      "B2": "B2 상시 Close형",
+      "M": "MI 기계적 Interlock (Mechanical interlock)",
+      "D": "DI (Door Interlock) (Catcher type), MOC( Mechanism operated cell switch)",
+      "K": "K1 Key Lock",
+      "K2": "K2 Key Interlock Set",
+      "K3": "K3 Key Lock Double",
+      "R": "RCS 투입준비접점 (Ready to Close switch)",
+      "T": "TM 온도감시장치 (Temperature Monitoring)",
+      "H1": "SHT2 (보조트립코일) AC/DC 100~130V",
+      "H2": "SHT2 (보조트립코일) AC/DC 200~250V",
+      "H3": "SHT2 (보조트립코일) DC 125V",
+      "H4": "SHT2 (보조트립코일) DC 24~30V",
+      "H5": "SHT2 (보조트립코일) DC 48~60V",
+      "H6": "SHT2 (보조트립코일) AC 380~480V",
+      "H7": "SHT2 (보조트립코일) AC 48V"
+    }
+  },
+  "ACB Cradle": {
+    "display": "ACB Cradle",
+    "storageKey": "ACB Cradle",
+    "slotLens": [
+      2,
+      4,
+      1,
+      1,
+      1,
+      1,
+      1,
+      2
+    ],
+    "slotLabels": [
+      "고유형식",
+      "정격전류 및 본체 Frame",
+      "극수",
+      "제어단자 접속방식",
+      "설치방식",
+      "안전 Shutter 유무",
+      "ARC Cover",
+      "슬롯7"
+    ],
+    "maps": [
+      {
+        "AL": "ACB Cradle"
+      },
+      {
+        "N06D": "AN-06D",
+        "N07D": "AN-07D",
+        "N08D": "AN-08D",
+        "N09D": "AN-09D",
+        "N10D": "AN-10D",
+        "N11D": "AN-11D",
+        "N12D": "AN-12D",
+        "N13D": "AN-13D",
+        "N14D": "AN-14D",
+        "N15D": "AN-15D",
+        "N16D": "AN-16D",
+        "S06D": "AS-06D",
+        "S07D": "AS-07D",
+        "S08D": "AS-08D",
+        "S09D": "AS-09D",
+        "S10D": "AS-10D",
+        "S11D": "AS-11D",
+        "S12D": "AS-12D",
+        "S13D": "AS-13D",
+        "S14D": "AS-14D",
+        "S15D": "AS-15D",
+        "S16D": "AS-16D",
+        "S20D": "AS-20D",
+        "N20E": "AN-20E",
+        "N21E": "AN-21E",
+        "N22E": "AN-22E",
+        "N23E": "AN-23E",
+        "N24E": "AN-24E",
+        "N25E": "AN-25E",
+        "N32E": "AN-32E",
+        "S20E": "AS-20E",
+        "S21E": "AS-21E",
+        "S22E": "AS-22E",
+        "S23E": "AS-23E",
+        "S24E": "AS-24E",
+        "S25E": "AS-25E",
+        "S32E": "AS-32E",
+        "S40E": "AS-40E",
+        "S40F": "AS-40F",
+        "S41F": "AS-41F",
+        "S42F": "AS-42F",
+        "S43F": "AS-43F",
+        "S44F": "AS-44F",
+        "S45F": "AS-45F",
+        "S46F": "AS-46F",
+        "S47F": "AS-47F",
+        "S48F": "AS-48F",
+        "S49F": "AS-49F",
+        "S50F": "AS-50F",
+        "S40G": "AS-40G",
+        "S41G": "AS-41G",
+        "S42G": "AS-42G",
+        "S43G": "AS-43G",
+        "S44G": "AS-44G",
+        "S45G": "AS-45G",
+        "S46G": "AS-46G",
+        "S47G": "AS-47G",
+        "S48G": "AS-48G",
+        "S49G": "AS-49G",
+        "S50G": "AS-50G",
+        "S63G": "AS-63G",
+        "H16C": "Compact ACB 400~1600A"
+      },
+      {
+        "3": "3극형",
+        "4": "4극형"
+      },
+      {
+        "J": "제어단자 수동접속",
+        "A": "제어단자 자동접속"
+      },
+      {
+        "H": "상하 수평형 (20D 불가)",
+        "V": "상하 수직형",
+        "M": "상 수평형, 하 수직형 (20D 불가)",
+        "N": "상 수직형, 하 수평형(20D 불가)",
+        "P": "상하 평면형 (20D, 40E, 40FG,50FG, 63G 불가)"
+      },
+      {
+        "E": "안전 셧터 없음",
+        "F": "안전 셧터 있음"
+      },
+      {
+        "N": "ARC Cover 없음",
+        "S": "ARC Cover 있음"
+      },
+      {}
+    ],
+    "optionMap": {}
+  },
+  "Compact ACB": {
+    "display": "Compact ACB",
+    "storageKey": "Compact ACB",
+    "slotLens": [
+      2,
+      2,
+      1,
+      1,
+      2,
+      1,
+      2,
+      2,
+      2,
+      2,
+      1,
+      1,
+      1,
+      2,
+      2
+    ],
+    "slotLabels": [
+      "본체명/Category",
+      "Ampere Frame (CT spec)",
+      "외형구분 및 상배열구분",
+      "극수",
+      "정격전류",
+      "설치방식",
+      "모터전원 (V)",
+      "투입전원 (V)",
+      "트립전원 (V)",
+      "보조접점 및 차지방식",
+      "Trip Relay type",
+      "통신(MODBUS) & 보호기능",
+      "제어전원 & 주파수",
+      "UVT",
+      "부속장치"
+    ],
+    "maps": [
+      {
+        "AR": "Cat.A 차단기 (400A~1000A / 차단용량 :150kA/415Vac, Ics=100%*Icu,개폐내구수명(무보수):5,000회(Cat.A))",
+        "AH": "Cat.B 차단기 (정격전류 400A~1600A(차단용량:50kA/690Vac, Ics=100%*Icu) 정격단시간전류 (Icw) : 50kA/1초 (개폐내구수명(무보수):12,500회(Cat.B))",
+        "AN": "Cat.B 차단기 (정격전류 400A~1600A(차단용량:42kA/690Vac, Ics=100%*Icu,개폐내구수명(무보수):12,500회(Cat.B)",
+        "AW": "Cat.B 차단기 (정격전류 400A~1600A(차단용량:40kA/800Vac, Ics=100%*Icu) 정격단시간전류 (Icw) : 40kA/1초 (개폐내구수명(무보수):12,500회(Cat.B))",
+        "DH": "Switch Disconnector"
+      },
+      {
+        "13": "1250AF",
+        "16": "1600AF",
+        "08": "800AF"
+      },
+      {
+        "C": "표준형 (N)RST",
+        "V": "역상형 RST(N)"
+      },
+      {
+        "3": "3극형",
+        "4": "4극형"
+      },
+      {
+        "10": "1000A",
+        "13": "1250A",
+        "16": "1600A",
+        "00": "無",
+        "04": "400A",
+        "06": "630A",
+        "08": "800A"
+      },
+      {
+        "A": "인출형 하부조작형 크래들용본체 (자동접속)",
+        "J": "인출형 하부조작형 크래들용본체 (수동접속)",
+        "H": "고정형 상하 수평형",
+        "V": "고정형 상하 수직형",
+        "M": "고정형 상 수평/하 수직형",
+        "N": "고정형 상 수직/하 수평형",
+        "P": "고정형 상하 평면형",
+        "Z": "고정형 상하 평면형(Spreader)",
+        "R": "고정형 상하 수평형(Spreader)",
+        "T": "고정형 평면확장 수직형",
+        "X": "고정형 Cable Lug형"
+      },
+      {
+        "MA": "모터 無",
+        "M1": "AC/DC 100V~130V",
+        "M2": "AC/DC 200V~250V",
+        "M3": "DC 125V",
+        "M4": "DC 24V~30V",
+        "M5": "DC 48V~60V",
+        "M6": "AC 380V~415V",
+        "M7": "AC 440V~480V",
+        "M8": "AC 48V"
+      },
+      {
+        "D0": "C.C 無",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "D0": "SHT 無",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "FX": "표준형 \"OFF\" 차지 4C",
+        "FC": "표준형 \"ON\" 차지 4C",
+        "LC": "표준형 \"ON\" 차지 3C",
+        "TCS": "적용",
+        "PX": "미소전류용 “OFF”차지 4C",
+        "PC": "미소전류용 “ON\" 차지 4C"
+      },
+      {
+        "0": "Trip Relay N/A",
+        "N": "Normal",
+        "A": "Ammeter",
+        "P": "Power meter",
+        "S": "Supreme meter"
+      },
+      {
+        "G": "통신무 + 지락 (Residual earth fault protection)",
+        "Z": "통신무 + 외부 CT지락 (30A 이하 누전)",
+        "E": "통신무 + 외부 CT지락 (30A 초과 누전)",
+        "C": "통신유 + 지락 (Residual earth fault protection)",
+        "K": "통신유 + 외부 CT지락 (30A 이하 누전)",
+        "X": "통신유 + 외부 CT지락 (30A 초과 누전)",
+        "V": "선박형 N 타입일 경우 PTA + 통신유 /선박형 A 타입일 경우 PTA + LCD + 통신무"
+      },
+      {
+        "0": "60Hz Self-Power N/A",
+        "1": "60Hz AC/DC 85V~264V N/A",
+        "2": "DC 21V~54V N/A",
+        "3": "60Hz AC/DC 85V~264V Bluetooth",
+        "4": "- DC 21V~54V Bluetooth",
+        "5": "50Hz Self-Power N/A",
+        "6": "50Hz AC/DC 85V~264V N/A",
+        "7": "DC 21V~54V N/A",
+        "8": "50Hz AC/DC 85V~264V Bluetooth",
+        "9": "DC 21V~54V Bluetooth"
+      },
+      {
+        "U0": "UVT 無",
+        "U1": "AC/DC 100V~130V",
+        "U2": "AC/DC 200V~250V",
+        "U3": "DC 125V",
+        "U4": "DC 24V~30V",
+        "U5": "DC 48V~60V",
+        "U6": "AC 380V~480V",
+        "U7": "AC 48V"
+      },
+      {}
+    ],
+    "optionMap": {
+      "AL": "알람접점 AL1 + 기계적리셋버튼 MRB",
+      "A1": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V)",
+      "A2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB",
+      "A3": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V)",
+      "A4": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V)",
+      "A5": "알람접점 AL1 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET",
+      "A7": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(DC 110~125V) + AUTO RESET",
+      "A8": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 200~250V) + AUTO RESET",
+      "A9": "알람접점 AL1 + 기계적리셋버튼 MRB + RES(AC 110~130V) + AUTO RESET",
+      "Y2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(2b contact)",
+      "Y6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(2b contact)",
+      "Z2": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB(1a1b contact)",
+      "Z6": "알람접점 AL1 + AL2 + 기계적리셋버튼 MRB + AUTO RESET(1a1b contact)",
+      "C": "C Counter",
+      "S": "CS2 차지완료통신접점 (Charge switch communication)",
+      "B": "B 상시 Open형",
+      "B1": "B1 상시 Open형 S type",
+      "B2": "B2 상시 Close형",
+      "M": "MI 기계적 Interlock (Mechanical interlock)",
+      "D": "DI (Door Interlock) (Catcher type), MOC( Mechanism operated cell switch)",
+      "K": "K1 Key Lock",
+      "K2": "K2 Key Interlock Set",
+      "K3": "K3 Key Lock Double",
+      "R": "RCS 투입준비접점 (Ready to Close switch)",
+      "T": "TM 온도감시장치 (Temperature Monitoring)",
+      "H1": "SHT2 (보조트립코일) AC/DC 100~130V",
+      "H2": "SHT2 (보조트립코일) AC/DC 200~250V",
+      "H3": "SHT2 (보조트립코일) DC 125V",
+      "H4": "SHT2 (보조트립코일) DC 24~30V",
+      "H5": "SHT2 (보조트립코일) DC 48~60V",
+      "H6": "SHT2 (보조트립코일) AC 380~480V",
+      "H7": "SHT2 (보조트립코일) AC 48V",
+      "(-V)": "External외부 VDM",
+      "EXP": "수출용포장",
+      "E01": "A4(AL1 + MRB + RES(AC200~250V)) + C(Counter) + B(ON/OFF 버튼 Lock)+ K(Key Lock) + R(투입준비접점) + M(Mechanicl Interlock)",
+      "E02": "AL(AL1 + MRB) + K(Key Lock(OFF Lock)) + R(투입준비접점) + D(Door Interlock orMOC) + H1(AC/DC 100V~130V, 이중 트립 코일)",
+      "E03": "C(Counter) + B(ON/OFF 버튼 Lock) + K2(Key Interlock Set) + R(투입준비접점)",
+      "E04": "A4(AL1 + MRB + RES(AC200~250V)) + B(ON/OFF 버튼 Lock) + K(Key Lock(OFF Lock)) + M(Mechanical Interlock)",
+      "E05": "A1(AL1 + MRB + RES110~130V) + B(ON/OFF 버튼 Lock) + K(Key Lock(OFF Lock)) +R(투입준비접점) + M(Mechanical Interlock)",
+      "E06": "A2(AL1 + AL2 + MRB) + C(Counter) + K(Key Lock(OFF Lock)) + R(투입준비접점)",
+      "MAR": "선박형"
+    }
+  },
+  "Compact ACB 선박형 (MAR)": {
+    "display": "Compact ACB 선박형 (MAR)",
+    "storageKey": "Compact ACB 선박형 (MAR)",
+    "slotLens": [
+      2,
+      2,
+      1,
+      1,
+      2,
+      1,
+      2,
+      2,
+      2,
+      2,
+      2,
+      1,
+      1,
+      1
+    ],
+    "slotLabels": [
+      "Main Body type",
+      "Ampere Frame (CT spec)",
+      "Frame sizes & phase array",
+      "Number of poles",
+      "Rated current",
+      "Installation & Connection",
+      "Motor rated voltage",
+      "Closing coil rated voltage",
+      "Shunt coil rated voltage",
+      "Aux.contact & charging types",
+      "Trip Relay type & Comm & Protection",
+      "Control Voltage & Frequency",
+      "UVT coil rated voltage",
+      "UVT coil rated voltage"
+    ],
+    "maps": [
+      {
+        "AR": "Cat.A 차단기 (400A~1000A / 차단용량 :150kA/415Vac, Ics=100%*Icu,개폐내구수명(무보수):5,000회(Cat.A))",
+        "AH": "Cat.B 차단기 (정격전류 400A~1600A(차단용량:50kA/690Vac, Ics=100%*Icu) 정격단시간전류 (Icw) : 50kA/1초 (개폐내구수명(무보수):12,500회(Cat.B))",
+        "AN": "Cat.B 차단기 (정격전류 400A~1600A(차단용량:42kA/690Vac, Ics=100%*Icu,개폐내구수명(무보수):12,500회(Cat.B)"
+      },
+      {
+        "13": "1250AF",
+        "16": "1600AF",
+        "08": "800AF"
+      },
+      {
+        "C": "Standard (N)RST",
+        "V": "Reverse RST(N)"
+      },
+      {
+        "3": "3P(C)",
+        "4": "4P(C,V)"
+      },
+      {
+        "10": "1000A",
+        "13": "1250A",
+        "16": "1600A",
+        "00": "None",
+        "04": "400A",
+        "06": "630A",
+        "08": "800A"
+      },
+      {
+        "A": "Automatic connection (Withdrawable)",
+        "J": "Manual connetion(Withdrawable)",
+        "H": "Horizontal type (Fixed)",
+        "V": "Vertical type(Fixed)",
+        "M": "Upper-Horizontal/Lower-Vertical type(Fixed)",
+        "N": "Upper-Vertical/Lower-Horizontal type(Fixed)",
+        "P": "Flat type(Fixed)",
+        "Z": "Flat spread type(Fixed)",
+        "R": "Spread type(Fixed)",
+        "T": "Flat vertical type(Fixed)",
+        "X": "Cable lug type(Fixed)"
+      },
+      {
+        "MA": "No Motor",
+        "M1": "AC/DC 100V~130V",
+        "M2": "AC/DC 200V~250V",
+        "M3": "DC 125V",
+        "M4": "DC 24V~30V",
+        "M5": "DC 48V~60V",
+        "M6": "AC 380V~415V",
+        "M7": "AC 440V~480V",
+        "M8": "AC 48V"
+      },
+      {
+        "D0": "Without Closing coil",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "D0": "Without Shunt coil",
+        "D1": "AC/DC 100V~130V",
+        "D2": "AC/DC 200V~250V",
+        "D3": "DC 125V",
+        "D4": "DC 24V~30V",
+        "D5": "DC 48V~60V",
+        "D6": "AC 380V~480V",
+        "D7": "AC 48V"
+      },
+      {
+        "FX": "Standard O 4C",
+        "FC": "Standard ON-Charge 4C",
+        "LC": "Standard ON-Charge 3C TCS",
+        "PX": "Standard OFF-Charge 4C _ low-level contacts",
+        "PC": "Standard ON-Charge 4c _ low-level contacts"
+      },
+      {
+        "NV": "Pre-Trip Alarm + Without comm./* Comm. works under control power/* LS output contacts works under control power./(LED indicators works without control power)",
+        "AV": "Pre-Trip Alaem + LCD + With comm/* Comm. works under control power/* LS output contacts works under control power./(LED indicators works without control power)"
+      },
+      {
+        "1": "AC/DC 100V~250V, 60Hz",
+        "6": "AC/DC 100V~250V, 50Hz"
+      },
+      {
+        "U0": "Without UVT coil",
+        "U1": "AC/DC 100V~130V",
+        "U2": "AC/DC 200V~250V",
+        "U3": "DC 125V",
+        "U4": "DC 24V~30V",
+        "U5": "DC 48V~60V",
+        "U6": "AC 380V~480V",
+        "U7": "AC 48V"
+      },
+      {}
+    ],
+    "optionMap": {
+      "AL": "Alarm contact AL1 + Mechanical Reset Button (MRB)",
+      "A1": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (AC 110–130 V)",
+      "A2": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB)",
+      "A3": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (DC 110–125 V)",
+      "A4": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (AC 200–250 V)",
+      "A5": "Alarm contact AL1 + Mechanical Reset Button (MRB) + Auto Reset",
+      "A6": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB) + Auto Reset",
+      "A7": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (DC 110–125 V) + Auto Reset",
+      "A8": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (AC 200–250 V) + Auto Reset",
+      "A9": "Alarm contact AL1 + Mechanical Reset Button (MRB) + RES (AC 110–130 V) + Auto Reset",
+      "Y2": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB) (2b contact)",
+      "Y6": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB) + Auto Reset (2b contact)",
+      "Z2": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB) (1a1b contact)",
+      "Z6": "Alarm contact AL1 + AL2 + Mechanical Reset Button (MRB) + Auto Reset (1a1b contact)",
+      "C": "Counter",
+      "S": "CS2 charge completion communication contact (Charge switch communication)",
+      "B": "On/Off Button lock (Normally Open type)",
+      "B1": "On/Off Button lock (Normally Open type, S type)",
+      "B2": "On/Off Button lock (Normally Closed type)",
+      "M": "MI Mechanical Interlock",
+      "D": "DI (Door Interlock, catcher type), MOC (Mechanism Operated Cell switch)",
+      "K": "K1 Key Lock",
+      "K2": "Key Interlock Set",
+      "K3": "Double Key Lock",
+      "R": "RCS Ready-to-Close switch",
+      "T": "TM Temperature Monitoring device",
+      "H1": "SHT2 (Shunt Trip Coil) AC/DC 100–130 V",
+      "H2": "SHT2 (Shunt Trip Coil) AC/DC 200–250 V",
+      "H3": "SHT2 (Shunt Trip Coil) DC 125 V",
+      "H4": "SHT2 (Shunt Trip Coil) DC 24–30 V",
+      "H5": "SHT2 (Shunt Trip Coil) DC 48–60 V",
+      "H6": "SHT2 (Shunt Trip Coil) AC 380–480 V",
+      "H7": "SHT2 (Shunt Trip Coil) AC 48 V",
+      "(-V)": "External VDM",
+      "EXP": "Export packing",
+      "E01": "A4 (AL1 + MRB + RES (AC 200–250 V)) + C (Counter) + B (ON/OFF button lock) + K (Key Lock) + R (Ready-to-Close switch) + M (Mechanical Interlock)",
+      "E02": "AL (AL1 + MRB) + K (Key Lock, OFF lock) + R (Ready-to-Close switch) + D (Door Interlock or MOC) + H1 (AC/DC 100–130 V, dual shunt trip coil)",
+      "E03": "C (Counter) + B (ON/OFF button lock) + K2 (Key Interlock Set) + R (Ready-to-Close switch)",
+      "E04": "A4 (AL1 + MRB + RES (AC 200–250 V)) + B (ON/OFF button lock) + K (Key Lock, OFF lock) + M (Mechanical Interlock)",
+      "E05": "A1 (AL1 + MRB + RES (AC 110–130 V)) + B (ON/OFF button lock) + K (Key Lock, OFF lock) + R (Ready-to-Close switch) + M (Mechanical Interlock)",
+      "E06": "A2 (AL1 + AL2 + MRB) + C (Counter) + K (Key Lock, OFF lock) + R (Ready-to-Close switch)",
+      "MAR": "Marine type"
+    }
+  }
+}</script>
+
+<h1>형명 판독기 (v7.6)</h1>
+<div id="err" style="display: none;"></div>
+
+<div class="flex">
+  <!-- Left -->
+  <div class="card">
+    <div class="stack">
+      <label for="modelInput"><strong>형명 입력</strong></label>
+      <input id="modelInput" placeholder="예: ADV32E4-16A M1D1D1AX SD1 U4A1BK">
+      <div class="small">앞 접두사(슬롯0) 기준 자동 인식</div>
+
+      <div class="row">
+        <input type="file" accept="image/*" id="imgInput">
+        <button id="ocrBtn">이미지에서 텍스트 읽기</button>
+      </div>
+
+      <div class="row">
+        <button id="decodeBtn">판독</button>
+        <button id="toggleSettingsBtn">⚙️ 설정</button>
+        <button id="saveToDiskBtn" title="파일에 저장 (지원 브라우저는 현재 파일 덮어쓰기)">파일에 저장</button>
+      </div>
+      <div class="result" id="resultArea"><div class="table-container"><table><thead><tr><th>항목</th><th>코드</th><th>설명</th></tr></thead><tbody><tr><td>Series</td><td></td><td>ACB Cradle</td></tr><tr><td>고유형식</td><td>AL</td><td>ACB Cradle</td></tr><tr><td>정격전류 및 본체 Frame</td><td>H16C</td><td>Compact ACB 400~1600A</td></tr><tr><td>극수</td><td>3</td><td>3극형</td></tr><tr><td>제어단자 접속방식</td><td>A</td><td>제어단자 자동접속</td></tr><tr><td>설치방식</td><td>H</td><td>상하 수평형 (20D 불가)</td></tr><tr><td>안전 Shutter 유무</td><td>E</td><td>안전 셧터 없음</td></tr><tr><td>ARC Cover</td><td>N</td><td>ARC Cover 없음</td></tr></tbody></table></div></div>
+    </div>
+  </div>
+
+  <!-- Right / Settings -->
+  <div id="settingsPanel" class="card" style="display: block;">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <strong>설정 <span id="currentFamilyName">(Compact ACB 선박형 (MAR))</span></strong>
+      <div class="row" style="gap:6px">
+        <button id="saveFamilyBtn" title="이 화면의 변경 사항을 familyData에 바로 반영">저장</button>
+        <button id="restoreFamilyBtn" title="선택 제품군을 초기값으로 복원">기본 복원</button>
+      </div>
+    </div>
+
+    <div style="margin-top:10px">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <strong>제품군 선택 / 관리</strong>
+        <div class="addline">
+          <input id="newFamilyKey" placeholder="ID (영문/숫자)" style="max-width:180px">
+          <input id="newFamilyName" placeholder="표시 이름" style="max-width:200px">
+          <button id="addFamilyBtn">제품군 추가</button>
+        </div>
+      </div>
+      <div id="familyContainer" class="family-list"><div class="family-item"><button data-key="Susol">Susol ACB</button><button class="del-btn" data-del-key="Susol" style="margin-left: 6px;">삭제</button></div><div class="family-item"><button data-key="Metasol">Metasol ACB</button><button class="del-btn" data-del-key="Metasol" style="margin-left: 6px;">삭제</button></div><div class="family-item"><button data-key="ACB Cradle">ACB Cradle</button><button class="del-btn" data-del-key="ACB Cradle" style="margin-left: 6px;">삭제</button></div><div class="family-item"><button data-key="Compact ACB">Compact ACB</button><button class="del-btn" data-del-key="Compact ACB" style="margin-left: 6px;">삭제</button></div><div class="family-item"><button data-key="Compact ACB 선박형 (MAR)">Compact ACB 선박형 (MAR)</button><button class="del-btn" data-del-key="Compact ACB 선박형 (MAR)" style="margin-left: 6px;">삭제</button></div></div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <label>표시 이름: <input id="displayName"></label>
+    </div>
+
+    <div style="margin-top:12px;">
+      <strong>슬롯 설정</strong>
+      <div class="row" style="margin:6px 0;">
+        <button id="addSlotBtn">➕ 슬롯</button>
+        <button id="removeSlotBtn">➖ 슬롯</button>
+      </div>
+      <div id="slotConfig"><div class="slot-row"><div class="slot-box"><label>슬롯 0 길이:<br><input class="slot-len" data-idx="0" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="0" value="Main Body type"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 1 길이:<br><input class="slot-len" data-idx="1" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="1" value="Ampere Frame (CT spec)"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 2 길이:<br><input class="slot-len" data-idx="2" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="2" value="Frame sizes &amp; phase array"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 3 길이:<br><input class="slot-len" data-idx="3" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="3" value="Number of poles"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 4 길이:<br><input class="slot-len" data-idx="4" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="4" value="Rated current"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 5 길이:<br><input class="slot-len" data-idx="5" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="5" value="Installation &amp; Connection"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 6 길이:<br><input class="slot-len" data-idx="6" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="6" value="Motor rated voltage"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 7 길이:<br><input class="slot-len" data-idx="7" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="7" value="Closing coil rated voltage"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 8 길이:<br><input class="slot-len" data-idx="8" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="8" value="Shunt coil rated voltage"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 9 길이:<br><input class="slot-len" data-idx="9" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="9" value="Aux.contact &amp; charging types"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 10 길이:<br><input class="slot-len" data-idx="10" type="number" min="1" value="2"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="10" value="Trip Relay type &amp; Comm &amp; Protection"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 11 길이:<br><input class="slot-len" data-idx="11" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="11" value="Control Voltage &amp; Frequency"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 12 길이:<br><input class="slot-len" data-idx="12" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="12" value="UVT coil rated voltage"></label></div></div><div class="slot-row"><div class="slot-box"><label>슬롯 13 길이:<br><input class="slot-len" data-idx="13" type="number" min="1" value="1"></label></div><div class="slot-box"><label>라벨:<br><input class="slot-label" data-idx="13" value="UVT coil rated voltage"></label></div></div></div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <strong>슬롯 코드 → 설명 매핑</strong>
+      <div id="mappingEditors"><div><strong>슬롯 0 (Main Body type)</strong></div><textarea rows="4" id="map_0" style="width: 100%;"></textarea><div><strong>슬롯 1 (Ampere Frame (CT spec))</strong></div><textarea rows="4" id="map_1" style="width: 100%;"></textarea><div><strong>슬롯 2 (Frame sizes &amp; phase array)</strong></div><textarea rows="4" id="map_2" style="width: 100%;"></textarea><div><strong>슬롯 3 (Number of poles)</strong></div><textarea rows="4" id="map_3" style="width: 100%;"></textarea><div><strong>슬롯 4 (Rated current)</strong></div><textarea rows="4" id="map_4" style="width: 100%;"></textarea><div><strong>슬롯 5 (Installation &amp; Connection)</strong></div><textarea rows="4" id="map_5" style="width: 100%;"></textarea><div><strong>슬롯 6 (Motor rated voltage)</strong></div><textarea rows="4" id="map_6" style="width: 100%;"></textarea><div><strong>슬롯 7 (Closing coil rated voltage)</strong></div><textarea rows="4" id="map_7" style="width: 100%;"></textarea><div><strong>슬롯 8 (Shunt coil rated voltage)</strong></div><textarea rows="4" id="map_8" style="width: 100%;"></textarea><div><strong>슬롯 9 (Aux.contact &amp; charging types)</strong></div><textarea rows="4" id="map_9" style="width: 100%;"></textarea><div><strong>슬롯 10 (Trip Relay type &amp; Comm &amp; Protection)</strong></div><textarea rows="4" id="map_10" style="width: 100%;"></textarea><div><strong>슬롯 11 (Control Voltage &amp; Frequency)</strong></div><textarea rows="4" id="map_11" style="width: 100%;"></textarea><div><strong>슬롯 12 (UVT coil rated voltage)</strong></div><textarea rows="4" id="map_12" style="width: 100%;"></textarea><div><strong>슬롯 13 (UVT coil rated voltage)</strong></div><textarea rows="4" id="map_13" style="width: 100%;"></textarea></div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <strong>부속장치(옵션) 매핑 편집</strong>
+      <textarea id="optionMapping" rows="4" style="width:100%;"></textarea>
+      <div class="small">각 줄: CODE:Description</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const errBox = document.getElementById('err');
+  const showErr = (msg) => { errBox.textContent = msg; errBox.style.display='block'; };
+  const clearErr = () => { errBox.style.display='none'; errBox.textContent=''; };
+
+  // 0) 데이터 로드
+  const defaultFamilies = JSON.parse(document.getElementById('familyData').textContent || '{}');
+  let families = JSON.parse(JSON.stringify(defaultFamilies));
+  let currentKey = Object.keys(families)[0] || null;
+
+  // 1) 유틸
+  const q = (s) => document.querySelector(s);
+  const qa = (s) => Array.from(document.querySelectorAll(s));
+
+  // 옵션 파서
+  const defaultOptDesc = { AL:'AL1 + MRB', A1:'MRB + RES', A2:'AL2 + MRB', B:'Counter', C:'Count Reset', K:'Key Lock', CS2:'Charge 통신' };
+  const defaultOptCodes = Object.keys(defaultOptDesc);
+
+  function allOptionMatches(s, cs){
+    const m=[]; for(let i=0;i<s.length;i++){ cs.forEach(c=>{ if(s.substr(i,c.length)===c) m.push({code:c,start:i,end:i+c.length}); }); }
+    return m;
+  }
+  function filterInvalidOptionCombos(cs){
+    const u=[...cs];
+    if(u.filter(x=>x==='AL').length>1){ const f=u.indexOf('AL'); for(let i=u.length-1;i>f;i--) if(u[i]==='AL') u.splice(i,1); }
+    const keys=u.filter(x=>['K','C'].includes(x));
+    if(keys.length>1) keys.slice(1).forEach(k=>{ const idx=u.indexOf(k); if(idx>-1) u.splice(idx,1); });
+    return u;
+  }
+  function bestOptionCombination(s,o,f){
+    const codes=[...new Set([...(o?Object.keys(o):[]),...(f||[])])].sort((a,b)=>b.length-a.length);
+    const ms=allOptionMatches(s,codes);
+    let best=[],score=0;
+    (function bt(i,path){
+      if(i>=ms.length){
+        const filt=filterInvalidOptionCombos(path.map(x=>x.code));
+        const sc=filt.reduce((a,c)=>a+c.length,0);
+        if(sc>score){score=sc;best=filt;} return;
+      }
+      bt(i+1,path);
+      const cur=ms[i];
+      if(!path.some(p=>!(p.end<=cur.start||p.start>=cur.end))) bt(i+1,path.concat(cur));
+    })(0,[]);
+    return best.length?best:codes.filter(c=>s.includes(c));
+  }
+
+  // 2) 렌더러
+  function renderFamilyList(){
+    const c = document.getElementById('familyContainer');
+    c.innerHTML = '';
+    Object.keys(families).forEach(key=>{
+      const wrap = document.createElement('div');
+      wrap.className = 'family-item';
+      const b = document.createElement('button');
+      b.textContent = families[key].display || key;
+      b.dataset.key = key;
+      const del = document.createElement('button');
+      del.textContent = '삭제';
+      del.className = 'del-btn';
+      del.dataset.delKey = key;
+      del.style.marginLeft='6px';
+      wrap.append(b, del);
+      c.appendChild(wrap);
+    });
+  }
+
+  function selectFamily(key){
+    clearErr();
+    currentKey = key;
+    const f = families[key];
+    if(!f){ showErr('선택한 제품군을 찾을 수 없습니다.'); return; }
+    document.getElementById('currentFamilyName').textContent = `(${f.display || key})`;
+    document.getElementById('displayName').value = f.display || key;
+
+    // 슬롯 UI
+    const slotDiv = document.getElementById('slotConfig'); slotDiv.innerHTML='';
+    (f.slotLens||[]).forEach((len,i)=>{
+      const row=document.createElement('div'); row.className='slot-row';
+      const b1=document.createElement('div'); b1.className='slot-box';
+      b1.innerHTML = `<label>슬롯 ${i} 길이:<br><input class="slot-len" data-idx="${i}" type="number" min="1" value="${len||1}"></label>`;
+      const b2=document.createElement('div'); b2.className='slot-box';
+      const label = f.slotLabels && f.slotLabels[i] ? f.slotLabels[i] : `슬롯${i}`;
+      b2.innerHTML = `<label>라벨:<br><input class="slot-label" data-idx="${i}" value="${label}"></label>`;
+      row.append(b1,b2);
+      slotDiv.append(row);
+    });
+
+    // 매핑 UI
+    const mapDiv=document.getElementById('mappingEditors'); mapDiv.innerHTML='';
+    (f.maps||[]).forEach((map,i)=>{
+      const lbl=document.createElement('div');
+      const label = (f.slotLabels && f.slotLabels[i]) ? f.slotLabels[i] : `슬롯${i}`;
+      lbl.innerHTML = `<strong>슬롯 ${i} (${label})</strong>`;
+      const ta=document.createElement('textarea');
+      ta.rows=4; ta.style.width='100%'; ta.id=`map_${i}`;
+      ta.value = Object.entries(map||{}).map(([k,v])=>`${k}:${v}`).join('\n');
+      mapDiv.append(lbl,ta);
+    });
+
+    // 옵션 UI
+    const omap = f.optionMap || {};
+    document.getElementById('optionMapping').value = Object.entries(omap).map(([k,v]) => `${k}:${v}`).join('\n');
+  }
+
+  // 3) 동작
+  function detectFamily(raw){
+    const u=raw.toUpperCase();
+    for(const k in families){
+      const head = (families[k].maps||[])[0] || {};
+      for(const p in head){ if(u.startsWith(p)) return k; }
+    }
+    return Object.keys(families)[0];
+  }
+
+  function decode(){
+    clearErr();
+    const raw = document.getElementById('modelInput').value.replace(/\s|-/g,'').toUpperCase();
+    const re = document.getElementById('resultArea');
+    if(!raw){ re.innerHTML='<div style="color:#b91c1c">입력 없음</div>'; return; }
+
+    const famKey = detectFamily(raw);
+    const f = families[famKey];
+    if(!f){ showErr('해당 형식에 맞는 제품군을 찾을 수 없습니다.'); return; }
+
+    let idx=0, rows=[['Series','',f.display||famKey]];
+    const lens=f.slotLens||[], labels=f.slotLabels||[], maps=f.maps||[];
+    for(let i=0;i<lens.length;i++){
+      if(i===lens.length-1){
+        const optStr=raw.substr(idx);
+        const codes=bestOptionCombination(optStr,f.optionMap,defaultOptCodes);
+        codes.forEach(c=>rows.push(['부속장치',c,(f.optionMap&&f.optionMap[c])||defaultOptDesc[c]||'정의 없음']));
+        break;
+      }
+      const l=lens[i]||1; if(raw.length-idx<l) break;
+      const cd=raw.substr(idx,l); idx+=l;
+      rows.push([labels[i]||`슬롯${i}`, cd, (maps[i]&&maps[i][cd])||'정의 없음']);
+    }
+    let html='<div class="table-container"><table><thead><tr><th>항목</th><th>코드</th><th>설명</th></tr></thead><tbody>';
+    rows.forEach(r=>{ html+=`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`; });
+    html+='</tbody></table></div>';
+    re.innerHTML=html;
+  }
+
+  function stashEditsIntoMemory(){
+    if(!currentKey || !families[currentKey]) return;
+    const f = families[currentKey];
+    f.display = document.getElementById('displayName').value.trim() || f.display || currentKey;
+
+    // 슬롯
+    const lens=[], labels=[];
+    qa('.slot-len').forEach(inp => { const i=+inp.dataset.idx; lens[i]=Math.max(1, +inp.value||1); });
+    qa('.slot-label').forEach(inp => { const i=+inp.dataset.idx; labels[i]=inp.value||`슬롯${i}`; });
+    if(lens.length) f.slotLens = lens;
+    if(labels.length) f.slotLabels = labels;
+
+    // 매핑
+    f.maps = (f.maps && Array.isArray(f.maps)) ? f.maps : [];
+    f.maps = f.slotLens.map((_,i)=>{
+      const ta = document.getElementById(`map_${i}`);
+      if(!ta) return {};
+      const o={};
+      ta.value.split(/\n+/).forEach(line=>{
+        const [k, ...rest] = line.split(':');
+        const v = rest.join(':');
+        if(k && v !== undefined) o[k.trim()] = v.trim();
+      });
+      return o;
+    });
+
+    // 옵션
+    const no={};
+    document.getElementById('optionMapping').value.split(/\n+/).forEach(line=>{
+      const [k,...rest] = line.split(':');
+      const v = rest.join(':');
+      if(k && v !== undefined) no[k.trim()] = v.trim();
+    });
+    f.optionMap = no;
+  }
+
+  function saveIntoFamilyDataScript(){
+    try{
+      stashEditsIntoMemory();
+      const el = document.getElementById('familyData');
+      el.textContent = JSON.stringify(families, null, 2);
+      // 포커스 잃지 않도록 안내만
+      alert('문서 내부 설정(familyData)이 갱신되었습니다.');
+    }catch(e){ showErr('familyData 갱신 실패: '+e.message); }
+  }
+
+  async function saveToDisk(){
+    try{
+      // 먼저 문서 내부 반영
+      saveIntoFamilyDataScript();
+
+      const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+      if(window.showSaveFilePicker){
+        const handle = await window.showSaveFilePicker({
+          suggestedName: document.title.replace(/\s+/g,'_') + '.html',
+          types: [{ description:'HTML', accept:{ 'text/html':['.html','.htm'] } }]
+        });
+        const w = await handle.createWritable();
+        await w.write(html); await w.close();
+        alert('파일에 저장되었습니다.');
+      }else{
+        const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = '형명판독기_설정포함.html';
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+        alert('브라우저가 파일 시스템 API를 지원하지 않아 다운로드로 저장했습니다.');
+      }
+    }catch(e){ showErr('저장 실패: '+e.message); }
+  }
+
+  // 4) 이벤트 바인딩 (모바일에서도 안정적으로 동작하도록)
+  document.getElementById('decodeBtn').addEventListener('click', decode);
+  document.getElementById('toggleSettingsBtn').addEventListener('click', ()=>{
+    const p=document.getElementById('settingsPanel');
+    p.style.display = (p.style.display==='none' || !p.style.display) ? 'block' : 'none';
+  });
+  document.getElementById('saveFamilyBtn').addEventListener('click', saveIntoFamilyDataScript);
+  document.getElementById('saveToDiskBtn').addEventListener('click', saveToDisk);
+
+  // 제품군 추가
+  document.getElementById('addFamilyBtn').addEventListener('click', ()=>{
+    const k = (document.getElementById('newFamilyKey').value || '').trim();
+    const d = (document.getElementById('newFamilyName').value || '').trim() || k;
+    if(!k) { alert('ID를 입력하세요.'); return; }
+    if(families[k]){ alert('이미 존재하는 ID입니다.'); return; }
+    families[k] = { display:d, storageKey:k, slotLens:[2], slotLabels:['슬롯0'], maps:[{}], optionMap:{} };
+    renderFamilyList();
+    selectFamily(k);
+    document.getElementById('newFamilyKey').value='';
+    document.getElementById('newFamilyName').value='';
+  });
+
+  // 제품군 선택/삭제 (델리게이션)
+  document.getElementById('familyContainer').addEventListener('click', (e)=>{
+    const keySel = e.target.dataset.key;
+    const keyDel = e.target.dataset.delKey;
+    if(keySel){ selectFamily(keySel); }
+    else if(keyDel){
+      const keys = Object.keys(families);
+      if(keys.length<=1){ alert('최소 1개 제품군은 남아야 합니다.'); return; }
+      if(!confirm(`제품군 '${keyDel}'을(를) 삭제할까요?`)) return;
+      delete families[keyDel];
+      // 선택한 것이 지워졌다면 첫 제품군으로
+      if(currentKey === keyDel){
+        currentKey = Object.keys(families)[0] || null;
+      }
+      renderFamilyList();
+      if(currentKey) selectFamily(currentKey);
+      else{
+        // 전부 없어지는 일은 없지만, 방어
+        document.getElementById('currentFamilyName').textContent='';
+        document.getElementById('slotConfig').innerHTML='';
+        document.getElementById('mappingEditors').innerHTML='';
+        document.getElementById('optionMapping').value='';
+      }
+    }
+  });
+
+  // 슬롯 +/-
+  document.getElementById('addSlotBtn').addEventListener('click', ()=>{
+    if(!currentKey) return;
+    const f=families[currentKey];
+    f.slotLens = (f.slotLens||[]).concat([2]);
+    f.slotLabels = (f.slotLabels||[]).concat([`슬롯${f.slotLens.length-1}`]);
+    f.maps = (f.maps||[]).concat([{}]);
+    selectFamily(currentKey);
+  });
+  document.getElementById('removeSlotBtn').addEventListener('click', ()=>{
+    if(!currentKey) return;
+    const f=families[currentKey];
+    if((f.slotLens||[]).length>1){
+      f.slotLens.pop(); f.slotLabels.pop(); f.maps.pop();
+      selectFamily(currentKey);
+    }else{
+      alert('슬롯은 최소 1개 필요합니다.');
+    }
+  });
+
+// ===== 형명 추출기 (AN-13D3-13H, AH10D3-10A 등) =====
+function extractModel(text) {
+  const lines = text.toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const regs = [
+    /\b[A-Z]{1,3}-\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,   // AN-13D3-13H / AH-10D3-10A
+    /\b[A-Z]{1,3}\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,    // AH10D3-10A (첫 하이픈 없이 시작)
+    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g           // 여유 패턴(하이픈 1~2개 포함, 숫자 포함)
+  ];
+
+  let cands = [];
+  for (const r of regs) {
+    for (const ln of lines) {
+      const ms = [...ln.matchAll(r)];
+      for (const m of ms) {
+        // “AIR-CIRCUIT-BREAKER” 같은 전부 문자만인 후보 제거
+        if (/\d/.test(m[0])) cands.push(m[0]);
+      }
+    }
+  }
+  cands = [...new Set(cands)];
+  if (!cands.length) return null;
+
+  // 점수: 하이픈 2개 선호, 숫자 2개 이상, 길이 적당(8~20), A로 시작 선호
+  const score = s => {
+    let sc = 0;
+    if ((s.match(/-/g) || []).length >= 2) sc += 3;
+    if ((s.match(/\d/g) || []).length >= 2) sc += 2;
+    if (/^A[A-Z]/.test(s)) sc += 2;
+    const coreLen = s.replace(/-/g, '').length;
+    sc += Math.max(0, 14 - Math.abs(coreLen - 10));
+    return sc;
+  };
+  cands.sort((a, b) => score(b) - score(a));
+  return cands[0];
+}
+
+  // ---- OCR 핸들러 교체 시작 ----
+async function ensureTesseract() {
+  if (window.Tesseract) {
+    if (!window.tesseract) window.tesseract = window.Tesseract;
+    return window.Tesseract;
+  }
+  // 1차: jsDelivr
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.crossOrigin = 'anonymous';
+    s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+  if (window.Tesseract) {
+    if (!window.tesseract) window.tesseract = window.Tesseract;
+    return window.Tesseract;
+  }
+  throw new Error('Tesseract 라이브러리 로드 실패');
+}
+
+const attachOCR = () => {
+  const btn = document.getElementById('ocrBtn');
+  if (!btn) return;
+  // 혹시 기존 리스너가 남아있을 수 있으니 먼저 복제-치환으로 초기화
+  const fresh = btn.cloneNode(true);
+  btn.parentNode.replaceChild(fresh, btn);
+
+  fresh.addEventListener('click', async () => {
+    clearErr();
+    try {
+      const fi = document.getElementById('imgInput');
+      if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
+
+      const T = await ensureTesseract();
+
+      // 환경 감지
+      const isIOSWebKit =
+        /AppleWebKit/.test(navigator.userAgent) &&
+        (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+      // iOS는 blob 워커 OFF, 그 외(file:// 포함)는 ON
+      const useBlobWorker = (location.protocol === 'file:') ? true : !isIOSWebKit;
+
+      // v5: 언어는 첫 인자, 옵션은 세 번째 인자
+      const worker = await T.createWorker(
+  'eng+kor',
+  undefined,
+  {
+    // 워커/코어는 같은 CDN + 같은 버전으로 고정
+    workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+    corePath:   'https://unpkg.com/tesseract.js-core@5.1.0', // 폴더 경로
+    langPath:   'https://tessdata.projectnaptha.com/4.0.0',
+    workerBlobURL: useBlobWorker
+  }
+);
+
+
+      await worker.setParameters({
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+      });
+
+      const { data: { text } } = await worker.recognize(fi.files[0]);
+      await worker.terminate();
+
+      const model = extractModel(text || '');
+      if (!model) { alert('형명 패턴을 못 찾았어. 사진을 더 정면/선명하게 찍어줘.'); return; }
+
+      document.getElementById('modelInput').value = model;
+      decode();
+    } catch (e) {
+  const msg =
+    (e && e.message) ||
+    (e && e.reason && String(e.reason)) ||
+    (e && e.type) ||
+    (e && e.target && e.target.src && ('load fail: ' + e.target.src)) ||
+    String(e);
+  showErr('OCR 실패: ' + msg);
+}
+
+  });
+};
+
+// DOM 뒤에 붙도록 보강
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', attachOCR);
+} else {
+  attachOCR();
+}
+// ---- OCR 핸들러 교체 끝 ----
+
+
+
+
+  // 기본 렌더
+  renderFamilyList();
+  if(currentKey) selectFamily(currentKey);
+})();
+</script>
+
+
+</body></html>
