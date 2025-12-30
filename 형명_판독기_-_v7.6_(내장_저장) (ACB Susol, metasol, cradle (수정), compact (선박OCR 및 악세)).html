@@ -1334,23 +1334,53 @@
 
 // ===== 형명 추출기 (AN-13D3-13H, AH10D3-10A 등) =====
 function extractModel(text) {
-  const lines = text.toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const rawLines = text.toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const cleanLine = ln => ln
+    .replace(/[–—−]/g, '-') // en/em dash → hyphen
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/[^A-Z0-9-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const lines = rawLines
+    .map(cleanLine)
+    .map(ln => [ln, ln.replace(/\s+/g, '')]) // 여백 제거 버전도 함께 검사
+    .flat()
+    .filter(Boolean);
+
   const regs = [
-    /\b[A-Z]{1,3}-\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,   // AN-13D3-13H / AH-10D3-10A
-    /\b[A-Z]{1,3}\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,    // AH10D3-10A (첫 하이픈 없이 시작)
-    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g           // 여유 패턴(하이픈 1~2개 포함, 숫자 포함)
+    /\b[A-Z]{1,3}-?\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,    // AN-13D3-13H / AH-10D3-10A / AH10D3-10A
+    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g                 // 여유 패턴(하이픈 1~2개 포함, 숫자 포함)
   ];
+
+  const normalizeCandidate = s => s
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/O(?=\d)/g, '0')
+    .replace(/(?<=\d)O/g, '0');
 
   let cands = [];
   for (const r of regs) {
     for (const ln of lines) {
       const ms = [...ln.matchAll(r)];
       for (const m of ms) {
-        // “AIR-CIRCUIT-BREAKER” 같은 전부 문자만인 후보 제거
-        if (/\d/.test(m[0])) cands.push(m[0]);
+        const cand = normalizeCandidate(m[0]);
+        if (/\d/.test(cand)) cands.push(cand);
       }
     }
   }
+
+  // 여유 패턴이 없는 경우를 대비해 8~16자 알파뉴메릭/하이픈 뭉치도 수집
+  if (!cands.length) {
+    const loose = /[A-Z0-9-]{8,16}/g;
+    for (const ln of lines) {
+      const ms = [...ln.matchAll(loose)];
+      ms.forEach(m => cands.push(normalizeCandidate(m[0])));
+    }
+  }
+
   cands = [...new Set(cands)];
   if (!cands.length) return null;
 
@@ -1377,7 +1407,7 @@ async function ensureTesseract() {
   // 1차: jsDelivr
   await new Promise((res, rej) => {
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
     s.crossOrigin = 'anonymous';
     s.onload = res; s.onerror = rej;
     document.head.appendChild(s);
@@ -1387,6 +1417,115 @@ async function ensureTesseract() {
     return window.Tesseract;
   }
   throw new Error('Tesseract 라이브러리 로드 실패');
+}
+
+// 긴 네트워크/연산 지연에서 UI가 멈춘 것처럼 보이지 않도록 타임아웃을 건다.
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => rej(new Error(label || `작업이 ${ms / 1000}초 안에 끝나지 않았습니다.`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const NAMEPLATE_TOP_RATIO_PRIMARY = 0.45;
+const NAMEPLATE_TOP_RATIO_SECONDARY = 0.55;
+
+async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
+  if (!file) return null;
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('이미지 로드 실패'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    el.src = dataUrl;
+  });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = Math.round(img.height * topRatio);
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('이미지 크롭 실패')), 'image/jpeg', 0.96);
+  });
+}
+
+function normalizeNameplateText(text) {
+  return (text || '')
+    .toUpperCase()
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/O(?=\d)/g, '0')
+    .replace(/(?<=\d)O/g, '0')
+    .replace(/[^A-Z0-9-\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractNameplateModelOnly(text) {
+  const rawLines = (text || '').toUpperCase().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const cleanLine = ln => ln
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/[^A-Z0-9-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const lines = rawLines
+    .map(cleanLine)
+    .map(ln => [ln, ln.replace(/\s+/g, '')])
+    .flat()
+    .filter(Boolean);
+
+  const regs = [
+    /\b[A-Z]{1,3}-?\d{2}[A-Z]\d-?\d{2}[A-Z]\b/g,
+    /\b[A-Z]{1,3}(?:-?[A-Z0-9]){7,}\b/g
+  ];
+
+  const normalizeCandidate = s => s
+    .replace(/[–—−]/g, '-')
+    .replace(/\s*[-–—−]\s*/g, '-')
+    .replace(/\s+/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/O(?=\d)/g, '0')
+    .replace(/(?<=\d)O/g, '0');
+
+  let cands = [];
+  for (const r of regs) {
+    for (const ln of lines) {
+      const matches = ln.match(r);
+      if (matches) cands.push(...matches.map(normalizeCandidate));
+    }
+  }
+
+  cands = [...new Set(cands)];
+  if (!cands.length) return null;
+
+  const score = s => {
+    let sc = 0;
+    if ((s.match(/-/g) || []).length >= 2) sc += 3;
+    if ((s.match(/\d/g) || []).length >= 2) sc += 2;
+    if (/^A[A-Z]/.test(s)) sc += 2;
+    const coreLen = s.replace(/-/g, '').length;
+    sc += Math.max(0, 14 - Math.abs(coreLen - 10));
+    return sc;
+  };
+  cands.sort((a, b) => score(b) - score(a));
+  return cands[0];
 }
 
 // iOS Safari에서 메모리 부족으로 워커가 중단되는 문제를 줄이기 위해
@@ -1434,54 +1573,116 @@ const attachOCR = () => {
 
   fresh.addEventListener('click', async () => {
     clearErr();
-    try {
-      const fi = document.getElementById('imgInput');
-      if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
+    const origLabel = fresh.textContent;
+    const setBusy = (busy, label = '인식 중...') => {
+      fresh.disabled = busy;
+      fresh.textContent = busy ? label : origLabel;
+    };
 
-      const T = await ensureTesseract();
+    const fi = document.getElementById('imgInput');
+    if (!fi?.files?.length) { alert('이미지를 선택해주세요.'); return; }
 
-      // 환경 감지
-      const isIOSWebKit =
-        /AppleWebKit/.test(navigator.userAgent) &&
-        (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+    // 환경 감지
+    const isIOSWebKit =
+      /AppleWebKit/.test(navigator.userAgent) &&
+      (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 
-      // iOS는 blob 워커 OFF, 그 외(file:// 포함)는 ON
-      const useBlobWorker = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    // iOS Edge/Safari에서 외부 워커가 막힐 경우를 대비해 blob/외부 워커 2단계로 시도
+    const primaryBlob = (location.protocol === 'file:') ? true : !isIOSWebKit;
+    const attempts = [];
+    attempts.push(primaryBlob);
+    if (!attempts.includes(!primaryBlob)) attempts.push(!primaryBlob);
 
-      const worker = await T.createWorker({
-        logger: m => console.log(m),
-        workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-        corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        workerBlobURL: useBlobWorker
-      });
+    let lastErr = null;
+    const resized = await prepareImage(fi.files[0]);
+    const sourceImage = resized || fi.files[0];
+    const cropCache = new Map();
+    const cropVariants = [
+      { ratio: NAMEPLATE_TOP_RATIO_PRIMARY, label: '상단 45%' },
+      { ratio: NAMEPLATE_TOP_RATIO_SECONDARY, label: '상단 55%' }
+    ];
+    const psmModes = ['7', '6'];
+    let fallbackText = '';
 
-      await worker.loadLanguage('eng+kor');
-      await worker.initialize('eng+kor');
-      await worker.setParameters({
-        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-      });
+    const getCrop = async (ratio) => {
+      if (!cropCache.has(ratio)) {
+        cropCache.set(ratio, await cropTopRegion(sourceImage, ratio));
+      }
+      return cropCache.get(ratio);
+    };
 
-      const resized = await prepareImage(fi.files[0]);
-      const { data: { text } } = await worker.recognize(resized || fi.files[0]);
-      await worker.terminate();
+    for (const useBlobWorker of attempts) {
+      let worker;
+      try {
+        setBusy(true, useBlobWorker ? '인식 중... (오프라인 워커)' : '인식 중... (온라인 워커)');
+        const T = await ensureTesseract();
+        worker = await withTimeout(
+          T.createWorker(
+            'eng',
+            undefined,
+            {
+              workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+              corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
+              langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+              workerBlobURL: useBlobWorker
+            }
+          ),
+          10000,
+          'OCR 워커 준비가 지연되고 있습니다. (네트워크 연결을 확인해주세요)'
+        );
 
-      const model = extractModel(text || '');
-      if (!model) { alert('형명 패턴을 못 찾았어. 사진을 더 정면/선명하게 찍어줘.'); return; }
+        for (const variant of cropVariants) {
+          const cropped = await getCrop(variant.ratio);
 
-      document.getElementById('modelInput').value = model;
+          for (const mode of psmModes) {
+            await withTimeout(worker.setParameters({
+              tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+              preserve_interword_spaces: '1',
+              user_defined_dpi: '300',
+              tessedit_pageseg_mode: mode,
+            }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM ${mode}, ${variant.label})`);
+
+            const { data: { text } } = await withTimeout(
+              worker.recognize(cropped),
+              15000,
+              `이미지 인식이 오래 걸립니다. (${variant.label}, PSM ${mode}) 사진 해상도를 낮추거나 네트워크 상태를 확인해주세요.`
+            );
+
+            const model = extractNameplateModelOnly(text || '');
+            if (model) {
+              document.getElementById('modelInput').value = model;
+              decode();
+              return; // 성공했으니 반복 종료
+            }
+
+            const fallback = normalizeNameplateText(text || '').replace(/\s+/g, '');
+            if (fallback && !fallbackText) fallbackText = fallback;
+          }
+        }
+      } catch (e) {
+        lastErr = e;
+        console.error('OCR 실패, useBlobWorker=', useBlobWorker, e);
+      } finally {
+        setBusy(false);
+        try { await worker?.terminate(); } catch (_) {}
+      }
+    }
+
+    if (fallbackText) {
+      document.getElementById('modelInput').value = fallbackText;
+      showErr('형명 패턴을 찾지 못해 추출 텍스트를 입력란에 채웠습니다. 필요하면 직접 수정해주세요.');
       decode();
-    } catch (e) {
-  const msg =
-    (e && e.message) ||
-    (e && e.reason && String(e.reason)) ||
-    (e && e.type) ||
-    (e && e.target && e.target.src && ('load fail: ' + e.target.src)) ||
-    String(e);
-  showErr('OCR 실패: ' + msg);
-}
+      return;
+    }
+
+    // 여기까지 오면 모든 시도가 실패한 것
+    const msg =
+      (lastErr && lastErr.message) ||
+      (lastErr && lastErr.reason && String(lastErr.reason)) ||
+      (lastErr && lastErr.type) ||
+      (lastErr && lastErr.target && lastErr.target.src && ('load fail: ' + lastErr.target.src)) ||
+      '알 수 없는 오류';
+    showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, 이미지 해상도를 더 낮춰 다시 시도해주세요.)');
 
   });
 };
