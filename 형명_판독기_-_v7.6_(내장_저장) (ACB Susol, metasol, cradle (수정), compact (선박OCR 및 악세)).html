@@ -2304,6 +2304,8 @@ const attachOCR = () => {
       }
       const roiLabel = roiState.roi ? `ROI ${Math.round(roiState.roi.width)}x${Math.round(roiState.roi.height)}` : 'ROI';
       for (const useBlobWorker of attempts) {
+        const roiPool = new Map();
+        const roiContexts = [];
         let worker;
         try {
           setBusy(true, useBlobWorker ? 'ROI 인식 중... (오프라인)' : 'ROI 인식 중... (온라인)');
@@ -2340,14 +2342,38 @@ const attachOCR = () => {
             const rawText = text || '';
             const label = `${roiLabel}, PSM ${mode}`;
             appendRawLog(label, rawText);
-            const model = extractNameplateModelOnly(rawText) || extractNameplateModelPlusCodes(rawText)?.split(' ')[0];
-            if (model && STRICT_MODEL_REGEX.test(model)) {
-              const combined = extractNameplateModelPlusCodes(rawText, model) || model;
-              document.getElementById('modelInput').value = combined;
-              decode();
-              appendRawLog('ROI 최종 선택', `${combined}\n출처: ${label}`);
-              return true;
-            }
+            collectModelCandidates(rawText, label, roiPool);
+            roiContexts.push({ label, text: rawText });
+          }
+
+          const best = pickBestModelCandidate(roiPool);
+          if (best && STRICT_MODEL_REGEX.test(best.candidate)) {
+            const auxResult = gatherAuxFromContexts(best.candidate, roiContexts);
+            const parts = [best.candidate];
+            if (auxResult.aux.length) parts.push(...auxResult.aux);
+            if (auxResult.expDetected) parts.push('EXP');
+
+            const combined = parts.join(' ').trim();
+            document.getElementById('modelInput').value = combined;
+            decode();
+
+            const sourceList = (best.sources || []).join(', ');
+            const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
+              `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+              `발견 위치: ${sourceList || 'N/A'}`;
+            const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+              `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+              `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+              `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+              `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
+              `선택된 aux: ${(auxResult.debug.selected || []).join(' | ') || '없음'}\n` +
+              `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
+              `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
+              `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
+            appendRawLog('선택된 aux/EXP (ROI)', auxDetail);
+            appendRawLog('ROI 모델 선택', debugSummary);
+            appendRawLog('ROI 최종 선택', `${combined}\n출처: ${sourceList || 'N/A'}`);
+            return true;
           }
         } catch (e) {
           lastErr = e;
