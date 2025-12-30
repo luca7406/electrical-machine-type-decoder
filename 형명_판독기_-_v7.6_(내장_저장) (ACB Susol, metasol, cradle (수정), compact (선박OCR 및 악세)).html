@@ -1663,12 +1663,14 @@ function splitAuxSequence(seq) {
   const len = s.length;
   if (len < 6) return [];
 
+  if (len >= 6 && len <= 12) return [s];
+
   const preferTwoTokenSplit = () => {
     let best = null;
-    for (let a = 6; a <= 8; a++) {
-      for (let b = 6; b <= 8; b++) {
+    for (let a = 6; a <= 12; a++) {
+      for (let b = 6; b <= 12; b++) {
         if (a + b !== len) continue;
-        const score = (8 - Math.abs(8 - a)) + (8 - Math.abs(8 - b));
+        const score = (10 - Math.abs(10 - a)) + (10 - Math.abs(10 - b));
         if (!best || score > best.score) best = { a, b, score };
       }
     }
@@ -1678,20 +1680,13 @@ function splitAuxSequence(seq) {
   const twoToken = preferTwoTokenSplit();
   if (twoToken) return [s.slice(0, twoToken.a), s.slice(twoToken.a)];
 
-  if (len >= 6 && len <= 8) return [s];
-
-  if (len > 8 && len <= 16) {
-    if (len - 6 >= 6 && len - 6 <= 8) return [s.slice(0, len - 6), s.slice(len - 6)];
-    if (len - 8 >= 6 && len - 8 <= 8) return [s.slice(0, 8), s.slice(8)];
-  }
-
   const tokens = [];
   let pos = 0;
   while (len - pos >= 6 && tokens.length < 2) {
     const remain = len - pos;
-    const take = Math.min(8, remain);
+    const take = Math.min(12, Math.max(6, remain - 6));
     const chunk = s.slice(pos, pos + take);
-    tokens.push(chunk);
+    if (chunk.length >= 6 && chunk.length <= 12) tokens.push(chunk);
     pos += take;
   }
   return tokens;
@@ -1707,26 +1702,19 @@ function extractAuxTokensFromText(text, model) {
 
   const modelCanon = canon(model || '');
   const upper = (text || '').toUpperCase();
-  const expDetected = /EXP\b/.test(upper);
-  const withoutExp = upper.replace(/EXP\b/g, ' ');
-
-  const lines = withoutExp.split(/\r?\n/);
+  const lines = upper.split(/\r?\n/);
   const lineCanon = lines.map(l => canon(l));
   const modelLineIdx = lineCanon.findIndex(l => l.includes(modelCanon) || l.includes(modelCanon.replace(/-/g, '')));
 
-  const relationFromIndex = (idx) => {
-    if (modelLineIdx < 0) return 'unknown';
-    if (idx === modelLineIdx) return 'same-line';
-    if (idx === modelLineIdx + 1) return 'next-line';
-    return 'other';
-  };
-
   const auxTokens = [];
   const decomposition = [];
+  const usedLines = [];
+  let expDetected = false;
 
   const pushToken = (tok, sourceLabel, relation, fromChunk) => {
     const t = (tok || '').trim();
     if (!t) return;
+    if (t.length < 6 || t.length > 12) return;
     if (/^\d+$/.test(t)) return;
     const canonTok = canon(t);
     if (!canonTok) return;
@@ -1746,9 +1734,24 @@ function extractAuxTokensFromText(text, model) {
     return res;
   };
 
-  lines.forEach((line, idx) => {
-    const relation = relationFromIndex(idx);
+  if (modelLineIdx < 0) {
+    decomposition.push('모델 라인을 찾지 못해 aux 추출 생략');
+    return { tokens: [], hasExp: false, decomposition, modelLineIdx: -1, usedLines: [] };
+  }
+
+  const targetIdx = [];
+  if (modelLineIdx + 1 < lines.length) targetIdx.push(modelLineIdx + 1);
+  if (modelLineIdx + 2 < lines.length) targetIdx.push(modelLineIdx + 2);
+
+  targetIdx.forEach((idx) => {
+    const relation = idx === modelLineIdx + 1 ? 'next-line' : 'second-next';
+    let line = lines[idx] || '';
+    if (/EXP\b/.test(line)) {
+      expDetected = true;
+      line = line.replace(/EXP\b/g, ' ');
+    }
     const cleanedLine = removeModelFromLine(line || '');
+    usedLines.push({ index: idx, line: cleanedLine.trim() });
     const spaced = (cleanedLine.match(/\b[A-Z0-9]{6,12}\b/g) || []);
     if (spaced.length) {
       decomposition.push(`(${relation}) spaced 원본: ${cleanedLine.trim()} -> ${spaced.join(', ')}`);
@@ -1763,7 +1766,7 @@ function extractAuxTokensFromText(text, model) {
     }
   });
 
-  return { tokens: auxTokens, hasExp: expDetected, decomposition };
+  return { tokens: auxTokens, hasExp: expDetected, decomposition, modelLineIdx, usedLines };
 }
 
 function gatherAuxFromContexts(model, contexts) {
@@ -1772,6 +1775,8 @@ function gatherAuxFromContexts(model, contexts) {
   const excluded = [];
   const decompositionLogs = [];
   let expDetected = false;
+  const modelLineInfos = [];
+  const auxSources = [];
 
   const evaluateAuxToken = (tok) => {
     const value = tok?.value || '';
@@ -1779,6 +1784,7 @@ function gatherAuxFromContexts(model, contexts) {
     const digits = (value.match(/\d/g) || []).length;
     const alphas = (value.match(/[A-Z]/g) || []).length;
     const digitRatio = len ? digits / len : 0;
+    if (len < 6 || len > 12) return { exclude: true, reason: '길이 6~12 아님' };
     if (/^\d+$/.test(value)) return { exclude: true, reason: '순수 숫자' };
     if (/\d{4,}/.test(value)) return { exclude: true, reason: '숫자 4개 이상 연속' };
     if (digitRatio >= 0.5) return { exclude: true, reason: '숫자 비율 50% 이상' };
@@ -1787,7 +1793,7 @@ function gatherAuxFromContexts(model, contexts) {
     let score = 0;
     if (alphas && alphas / len >= 0.7) score += 3;
     if (len >= 6 && len <= 8) score += 2;
-    if (tok.relation === 'same-line' || tok.relation === 'next-line') score += 3;
+    if (tok.relation === 'next-line' || tok.relation === 'second-next') score += 3;
     if (score <= 0) return { exclude: true, reason: '유효 가점 없음' };
     return { exclude: false, score };
   };
@@ -1799,9 +1805,15 @@ function gatherAuxFromContexts(model, contexts) {
     if (!canonText.includes(canonModel) && !canonText.includes(canonModel.replace(/-/g, ''))) {
       continue;
     }
-    const { tokens, hasExp, decomposition } = extractAuxTokensFromText(text, model);
+    const { tokens, hasExp, decomposition, modelLineIdx, usedLines } = extractAuxTokensFromText(text, model);
     if (Array.isArray(decomposition)) decompositionLogs.push(...decomposition.map(d => `${label}: ${d}`));
     if (hasExp) expDetected = true;
+    if (typeof modelLineIdx === 'number' && modelLineIdx >= 0) {
+      modelLineInfos.push(`${label}: model line index ${modelLineIdx}`);
+      if (Array.isArray(usedLines) && usedLines.length) {
+        auxSources.push(`${label}: ` + usedLines.map(u => `#${u.index}(${u.line})`).join(', '));
+      }
+    }
     for (const tok of tokens) {
       const evalResult = evaluateAuxToken(tok);
       if (evalResult.exclude) {
@@ -1828,9 +1840,12 @@ function gatherAuxFromContexts(model, contexts) {
   }
 
   const ranked = Array.from(auxMap.values()).map(entry => {
-    const finalScore = entry.bestScore + Math.max(0, entry.count - 1);
+    const finalScore = entry.bestScore + entry.count * 2;
     return { ...entry, finalScore, sources: Array.from(entry.sources) };
-  }).sort((a, b) => b.finalScore - a.finalScore);
+  }).sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return b.finalScore - a.finalScore;
+  });
 
   const selected = ranked.slice(0, 2);
   const aux = selected.map(t => t.value);
@@ -1838,7 +1853,10 @@ function gatherAuxFromContexts(model, contexts) {
     selected: selected.map(t => `${t.value} (score ${t.finalScore}, source: ${t.sources.join(', ') || 'N/A'})`),
     excluded,
     decomposition: decompositionLogs,
-    expDetected
+    expDetected,
+    modelLines: modelLineInfos,
+    sourceLines: auxSources,
+    counts: ranked.map(r => `${r.value}: ${r.count}회 (score ${r.finalScore})`)
   };
 
   return { aux, expDetected, sources: selected.flatMap(s => s.sources), debug };
@@ -2102,7 +2120,10 @@ const attachOCR = () => {
       const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
         `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
         `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+        `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+        `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
         `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
+        `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
         `제외된 aux: ${auxResult.debug.excluded.join(' | ') || '없음'}\n` +
         `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
       appendRawLog('선택된 aux/EXP', auxDetail);
