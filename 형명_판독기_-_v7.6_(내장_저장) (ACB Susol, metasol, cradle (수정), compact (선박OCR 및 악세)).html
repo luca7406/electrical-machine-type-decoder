@@ -1671,9 +1671,20 @@ function extractAuxTokensFromText(text, model) {
   const hasExp = /\bEXP\b/.test(upper) || /EXP/.test(upper);
   const withoutExp = upper.replace(/EXP/g, ' ');
 
+  const lines = (text || '').toUpperCase().split(/\r?\n/);
+  const lineCanon = lines.map(l => canon(l));
+  const modelLineIdx = lineCanon.findIndex(l => l.includes(modelCanon) || l.includes(modelCanon.replace(/-/g, '')));
+
   const auxTokens = [];
 
-  const pushToken = (tok, sourceLabel) => {
+  const relationFromIndex = (idx) => {
+    if (modelLineIdx < 0) return 'unknown';
+    if (idx === modelLineIdx) return 'same-line';
+    if (idx === modelLineIdx + 1) return 'next-line';
+    return 'other';
+  };
+
+  const pushToken = (tok, sourceLabel, relation) => {
     const t = (tok || '').trim();
     if (!t) return;
     if (/^\d+$/.test(t)) return;
@@ -1681,39 +1692,55 @@ function extractAuxTokensFromText(text, model) {
     if (!canonTok) return;
     if (canonTok === modelCanon || canonTok === modelCanon.replace(/-/g, '')) return;
     if (auxTokens.find(a => a.value === canonTok)) return;
-    auxTokens.push({ value: canonTok, raw: t, source: sourceLabel });
+    auxTokens.push({ value: canonTok, raw: t, source: sourceLabel, relation });
   };
 
-  const cleaned = withoutExp.replace(/[^A-Z0-9\s-]/g, ' ').replace(/\s+/g, ' ').trim();
-  const spaced = cleaned.match(/\b[A-Z0-9]{6,12}\b/g) || [];
-  for (const tok of spaced) pushToken(tok, 'spaced');
+  lines.forEach((line, idx) => {
+    const cleaned = line.replace(/[^A-Z0-9\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+    const spaced = cleaned.match(/\b[A-Z0-9]{6,12}\b/g) || [];
+    for (const tok of spaced) pushToken(tok, 'spaced', relationFromIndex(idx));
 
-  const gluedSource = withoutExp.replace(/[^A-Z0-9]/g, '');
-  const gluedSeqs = gluedSource.match(/[A-Z0-9]{6,}/g) || [];
-  for (const seq of gluedSeqs) {
-    let idx = 0;
-    while (seq.length - idx >= 6) {
-      const remain = seq.length - idx;
-      const take = remain > 12 ? 8 : remain;
-      const chunk = seq.slice(idx, idx + take);
-      pushToken(chunk, 'glued');
-      idx += take;
-      if (auxTokens.length >= 2) break;
+    const gluedSource = line.replace(/[^A-Z0-9]/g, '');
+    const gluedSeqs = gluedSource.match(/[A-Z0-9]{6,}/g) || [];
+    for (const seq of gluedSeqs) {
+      let pos = 0;
+      while (seq.length - pos >= 6) {
+        const remain = seq.length - pos;
+        const take = remain > 12 ? 8 : remain;
+        const chunk = seq.slice(pos, pos + take);
+        pushToken(chunk, 'glued', relationFromIndex(idx));
+        pos += take;
+      }
     }
-    if (auxTokens.length >= 2) break;
-  }
+  });
 
-  const uniq = auxTokens.slice(0, 2);
-  const tokens = uniq.map(t => t.raw || t.value);
-
-  return { auxTokens: tokens, hasExp };
+  return { tokens: auxTokens, hasExp };
 }
 
 function gatherAuxFromContexts(model, contexts) {
   const canonModel = (model || '').toUpperCase().replace(/[–—−]/g, '-').replace(/\s+/g, '');
-  const aux = [];
+  const auxMap = new Map();
+  const excluded = [];
   let expDetected = false;
-  const sources = [];
+
+  const evaluateAuxToken = (tok) => {
+    const value = tok?.value || '';
+    const len = value.length;
+    const digits = (value.match(/\d/g) || []).length;
+    const alphas = (value.match(/[A-Z]/g) || []).length;
+    const digitRatio = len ? digits / len : 0;
+    if (/^\d+$/.test(value)) return { exclude: true, reason: '순수 숫자' };
+    if (/\d{4,}/.test(value)) return { exclude: true, reason: '숫자 4개 이상 연속' };
+    if (digitRatio >= 0.5) return { exclude: true, reason: '숫자 비율 50% 이상' };
+    if (len > 10 && digits >= 3) return { exclude: true, reason: '길이 > 10 & 숫자 3개 이상' };
+
+    let score = 0;
+    if (alphas && alphas / len >= 0.7) score += 3;
+    if (len >= 6 && len <= 8) score += 2;
+    if (tok.relation === 'same-line' || tok.relation === 'next-line') score += 3;
+    if (score <= 0) return { exclude: true, reason: '유효 가점 없음' };
+    return { exclude: false, score };
+  };
 
   for (const ctx of contexts || []) {
     const text = ctx?.text || '';
@@ -1722,19 +1749,46 @@ function gatherAuxFromContexts(model, contexts) {
     if (!canonText.includes(canonModel) && !canonText.includes(canonModel.replace(/-/g, ''))) {
       continue;
     }
-    const { auxTokens, hasExp } = extractAuxTokensFromText(text, model);
+    const { tokens, hasExp } = extractAuxTokensFromText(text, model);
     if (hasExp) expDetected = true;
-    for (const tok of auxTokens) {
-      if (/^\d+$/.test(tok)) continue;
-      if (aux.includes(tok)) continue;
-      aux.push(tok);
-      sources.push(`${tok}: ${label}`);
-      if (aux.length >= 2) break;
+    for (const tok of tokens) {
+      const evalResult = evaluateAuxToken(tok);
+      if (evalResult.exclude) {
+        excluded.push(`${tok.raw || tok.value} (${label}): ${evalResult.reason}`);
+        continue;
+      }
+
+      const key = tok.value;
+      if (!auxMap.has(key)) {
+        auxMap.set(key, {
+          value: tok.raw || tok.value,
+          canon: key,
+          count: 0,
+          bestScore: evalResult.score,
+          relation: tok.relation,
+          sources: new Set(),
+        });
+      }
+      const entry = auxMap.get(key);
+      entry.count += 1;
+      entry.bestScore = Math.max(entry.bestScore, evalResult.score);
+      entry.sources.add(label + (tok.relation ? ` (${tok.relation})` : ''));
     }
-    if (aux.length >= 2 && expDetected) break;
   }
 
-  return { aux, expDetected, sources };
+  const ranked = Array.from(auxMap.values()).map(entry => {
+    const finalScore = entry.bestScore + Math.max(0, entry.count - 1);
+    return { ...entry, finalScore, sources: Array.from(entry.sources) };
+  }).sort((a, b) => b.finalScore - a.finalScore);
+
+  const selected = ranked.slice(0, 2);
+  const aux = selected.map(t => t.value);
+  const debug = {
+    selected: selected.map(t => `${t.value} (score ${t.finalScore}, source: ${t.sources.join(', ') || 'N/A'})`),
+    excluded,
+  };
+
+  return { aux, expDetected, sources: selected.flatMap(s => s.sources), debug };
 }
 
 const STRICT_MODEL_REGEX = /^[A-Z]{1,3}-[A-Z0-9]{2,6}-[A-Z0-9]{2,6}$/;
@@ -1992,7 +2046,12 @@ const attachOCR = () => {
       const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
         `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
         `발견 위치: ${sourceList || 'N/A'}`;
-      appendRawLog('선택된 aux/EXP', `aux: ${auxResult.aux.join(', ') || 'N/A'}\nEXP: ${auxResult.expDetected ? '예' : '아니오'}\n출처: ${auxResult.sources.join(' | ') || 'N/A'}`);
+      const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+        `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+        `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+        `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
+        `제외된 aux: ${auxResult.debug.excluded.join(' | ') || '없음'}`;
+      appendRawLog('선택된 aux/EXP', auxDetail);
       appendRawLog('최종 선택', debugSummary);
       return;
     }
