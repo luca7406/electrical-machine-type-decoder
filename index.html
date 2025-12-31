@@ -1226,23 +1226,23 @@
     const f = families[famKey];
     if(!f){ showErr('해당 형식에 맞는 제품군을 찾을 수 없습니다.'); return; }
 
-    let idx=0, rows=[['Series','',f.display||famKey]];
-    const lens=f.slotLens||[], labels=f.slotLabels||[], maps=f.maps||[];
-    for(let i=0;i<lens.length;i++){
-      if(i===lens.length-1){
-        const optStr=raw.substr(idx);
-        const codes=bestOptionCombination(optStr,f.optionMap,defaultOptCodes);
-        codes.forEach(c=>rows.push(['부속장치',c,(f.optionMap&&f.optionMap[c])||defaultOptDesc[c]||'정의 없음']));
-        break;
+    const { slotCandidates, optionStr } = buildSlotCandidateSets(raw, f);
+    const combos = cartesian(slotCandidates);
+    if (!combos.length) { showErr('해당 형식의 슬롯 후보를 생성하지 못했습니다.'); return; }
+
+    let best = null;
+    combos.forEach(slots => {
+      const result = evaluateCombination(slots, optionStr, f);
+      if (!best || result.unknown < best.unknown || (result.unknown === best.unknown && result.score > best.score)) {
+        best = { ...result, slots };
       }
-      const l=lens[i]||1; if(raw.length-idx<l) break;
-      const cd=raw.substr(idx,l); idx+=l;
-      rows.push([labels[i]||`슬롯${i}`, cd, (maps[i]&&maps[i][cd])||'정의 없음']);
+    });
+
+    if (!best) { showErr('디코드 후보를 평가하지 못했습니다.'); return; }
+    re.innerHTML = best.html;
+    if (best.unknown > 0 && combos.length > 1) {
+      showErr('일부 슬롯이 사전에 없어서 가장 적은 unknown 조합을 선택했습니다.');
     }
-    let html='<div class="table-container"><table><thead><tr><th>항목</th><th>코드</th><th>설명</th></tr></thead><tbody>';
-    rows.forEach(r=>{ html+=`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`; });
-    html+='</tbody></table></div>';
-    re.innerHTML=html;
   }
 
   function stashEditsIntoMemory(){
@@ -2069,6 +2069,145 @@ function pickBestModelCandidate(pool) {
   return scored[0] || null;
 }
 
+const CONFUSION_PAIRS = [
+  ['O', '0'],
+  ['S', '8'],
+  ['B', '8'],
+  ['I', '1'],
+  ['Z', '2'],
+  ['Q', '0'],
+];
+
+function generateConfusionVariants(token, allowed, maxDepth = 2) {
+  const al = Array.isArray(allowed) ? allowed : [];
+  const swaps = CONFUSION_PAIRS.reduce((map, [a, b]) => {
+    if (!map[a]) map[a] = [];
+    if (!map[b]) map[b] = [];
+    map[a].push(b);
+    map[b].push(a);
+    return map;
+  }, {});
+
+  const variants = new Set();
+  const visit = (cur, depth) => {
+    if (depth > maxDepth) return;
+    for (let i = 0; i < cur.length; i++) {
+      const ch = cur[i];
+      const swapsForCh = swaps[ch];
+      if (!swapsForCh || !swapsForCh.length) continue;
+      for (const rep of swapsForCh) {
+        const next = cur.slice(0, i) + rep + cur.slice(i + 1);
+        variants.add(next);
+        if (depth + 1 <= maxDepth) visit(next, depth + 1);
+      }
+    }
+  };
+
+  visit(token, 0);
+  const allowedOnly = [...variants].filter(v => !al.length || al.includes(v));
+  if (!al.length && !allowedOnly.includes(token)) allowedOnly.unshift(token);
+  if (al.includes(token)) allowedOnly.unshift(token);
+  const unique = [...new Set(allowedOnly)];
+  if (!al.length && !unique.length) return [token];
+  return unique;
+}
+
+function coerceBySlotType(token, slotType) {
+  const chars = token.split('');
+  if (slotType === 'numeric') {
+    return chars
+      .map(ch => {
+        if (ch === 'O') return '0';
+        if (ch === 'I') return '1';
+        if (ch === 'B' || ch === 'S') return '8';
+        return ch;
+      })
+      .join('');
+  }
+  if (slotType === 'alpha') {
+    return chars
+      .map(ch => {
+        if (ch === '0') return 'O';
+        if (ch === '1') return 'I';
+        if (ch === '8') return 'B';
+        return ch;
+      })
+      .join('');
+  }
+  return token;
+}
+
+function buildSlotCandidateSets(raw, family) {
+  const lens = Array.isArray(family?.slotLens) ? family.slotLens : [];
+  const maps = Array.isArray(family?.maps) ? family.maps : [];
+  const slotTypes = inferSlotTypes(family);
+
+  const slotCandidates = [];
+  let cursor = 0;
+  let optionStr = '';
+
+  for (let i = 0; i < lens.length; i++) {
+    if (i === lens.length - 1) {
+      optionStr = raw.slice(cursor);
+      break;
+    }
+    const len = lens[i] || 0;
+    const token = raw.substr(cursor, len);
+    cursor += len;
+    const allowed = Object.keys(maps[i] || {});
+    if (allowed.length) {
+      const variants = generateConfusionVariants(token, allowed, 2).filter(v => allowed.includes(v));
+      slotCandidates.push(variants.length ? variants : []);
+    } else {
+      slotCandidates.push([coerceBySlotType(token, slotTypes[i] || 'mixed')]);
+    }
+  }
+
+  return { slotCandidates, optionStr };
+}
+
+function cartesian(list) {
+  return list.reduce((acc, cur) => {
+    if (!acc.length) return cur.map(c => [c]);
+    const next = [];
+    for (const a of acc) {
+      for (const c of cur) next.push([...a, c]);
+    }
+    return next;
+  }, []);
+}
+
+function evaluateCombination(slots, optionStr, family) {
+  const lens = Array.isArray(family?.slotLens) ? family.slotLens : [];
+  const labels = Array.isArray(family?.slotLabels) ? family.slotLabels : [];
+  const maps = Array.isArray(family?.maps) ? family.maps : [];
+  let unknown = 0;
+  const rows = [['Series', '', family.display || detectFamily(slots.join(''))]];
+
+  for (let i = 0; i < slots.length; i++) {
+    const code = slots[i];
+    const map = maps[i] || {};
+    const desc = map[code] || '정의 없음';
+    if (!map[code]) unknown += 1;
+    rows.push([labels[i] || `슬롯${i}`, code, desc]);
+  }
+
+  const optCodes = bestOptionCombination(optionStr || '', family.optionMap, defaultOptCodes);
+  optCodes.forEach(c => {
+    const desc = (family.optionMap && family.optionMap[c]) || defaultOptDesc[c] || '정의 없음';
+    if (!family.optionMap?.[c] && !defaultOptDesc[c]) unknown += 1;
+    rows.push(['부속장치', c, desc]);
+  });
+
+  const htmlRows = rows
+    .map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`)
+    .join('');
+  const html = `<div class="table-container"><table><thead><tr><th>항목</th><th>코드</th><th>설명</th></tr></thead><tbody>${htmlRows}</tbody></table></div>`;
+
+  const baseScore = rows.length - unknown;
+  return { html, unknown, score: baseScore, combined: slots.join('') + (optionStr || ''), rows };
+}
+
 function inferSlotTypes(family) {
   const maps = (family && Array.isArray(family.maps)) ? family.maps : [];
   const lens = Array.isArray(family?.slotLens) ? family.slotLens : [];
@@ -2100,58 +2239,18 @@ function resolveAmbiguousO0(model) {
   const raw = normalized.replace(/-/g, '');
   const famKey = detectFamily(raw);
   const family = families[famKey] || {};
-  const lens = Array.isArray(family.slotLens) ? family.slotLens : [];
-  const slotTypes = inferSlotTypes(family);
+  const { slotCandidates, optionStr } = buildSlotCandidateSets(raw, family);
+  const combos = cartesian(slotCandidates);
+  const scored = combos.map(slots => {
+    const { unknown, combined } = evaluateCombination(slots, optionStr, family);
+    return { model: applyHyphenTemplate(combined, template), unknown };
+  });
 
-  const chars = raw.split('');
-  const tried = [];
-  let cursor = 0;
-  for (let i = 0; i < lens.length && cursor < chars.length; i++) {
-    if (i === lens.length - 1) break; // 옵션 영역은 남겨둔다
-    const len = lens[i] || 0;
-    const slotType = slotTypes[i] || 'mixed';
-    for (let j = 0; j < len && (cursor + j) < chars.length; j++) {
-      const idx = cursor + j;
-      const ch = chars[idx];
-      if (slotType === 'numeric' && ch === 'O') { chars[idx] = '0'; tried.push(`O@${idx}->0`); }
-      else if (slotType === 'alpha' && ch === '0') { chars[idx] = 'O'; tried.push(`0@${idx}->O`); }
-    }
-    cursor += len;
-  }
+  scored.sort((a, b) => {
+    if (a.unknown !== b.unknown) return a.unknown - b.unknown;
+    return b.model.length - a.model.length;
+  });
 
-  const ambiguousIndexes = [];
-  cursor = 0;
-  for (let i = 0; i < lens.length && cursor < chars.length; i++) {
-    if (i === lens.length - 1) break;
-    const len = lens[i] || 0;
-    const slotType = slotTypes[i] || 'mixed';
-    for (let j = 0; j < len && (cursor + j) < chars.length; j++) {
-      const idx = cursor + j;
-      if (slotType === 'mixed' && (chars[idx] === '0' || chars[idx] === 'O')) ambiguousIndexes.push(idx);
-    }
-    cursor += len;
-  }
-
-  const candidates = [chars.join('')];
-  if (ambiguousIndexes.length) {
-    const flipped = [...chars];
-    ambiguousIndexes.forEach(idx => { flipped[idx] = flipped[idx] === '0' ? 'O' : '0'; });
-    candidates.push(flipped.join(''));
-  }
-
-  const scoreVariant = (rawCandidate) => {
-    const candidateWithHyphen = applyHyphenTemplate(rawCandidate, template);
-    const strict = STRICT_MODEL_REGEX.test(candidateWithHyphen) ? 30 : 0;
-    const fam = families[detectFamily(rawCandidate)] || {};
-    const lensList = Array.isArray(fam.slotLens) ? fam.slotLens : [];
-    const minLen = lensList.slice(0, -1).reduce((a, b) => a + (b || 0), 0);
-    const lenScore = rawCandidate.length >= minLen ? 15 : 0;
-    const digitScore = /\d/.test(rawCandidate) ? 3 : 0;
-    const alphaScore = /[A-Z]/.test(rawCandidate) ? 3 : 0;
-    return { model: candidateWithHyphen, score: strict + lenScore + digitScore + alphaScore };
-  };
-
-  const scored = candidates.map(scoreVariant).sort((a, b) => b.score - a.score);
   return { resolved: scored[0]?.model || template, tried: scored.map(s => s.model) };
 }
 
