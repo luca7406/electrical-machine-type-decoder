@@ -996,6 +996,7 @@
       <div class="row">
         <input type="file" accept="image/*" id="imgInput">
         <button id="ocrBtn">이미지에서 텍스트 읽기</button>
+        <button id="resetScanBtn" type="button">새 스캔 / 초기화</button>
       </div>
 
       <div id="roiBox" class="stack">
@@ -2505,6 +2506,11 @@ function renderOcrRaw(text) {
   const toggle = document.getElementById('showRawOcr');
   console.log('[OCR raw]', text);
   if (!rawArea) return;
+  if (!text) {
+    rawArea.value = '';
+    rawArea.style.display = 'none';
+    return;
+  }
   if (toggle && !toggle.checked) {
     rawArea.style.display = 'none';
     return;
@@ -2664,24 +2670,48 @@ async function cropRoiVariants(file) {
 
 const attachOCR = () => {
   const btn = document.getElementById('ocrBtn');
-  if (!btn) return;
-  // 혹시 기존 리스너가 남아있을 수 있으니 먼저 복제-치환으로 초기화
-  const fresh = btn.cloneNode(true);
-  btn.parentNode.replaceChild(fresh, btn);
+  const fresh = btn ? btn.cloneNode(true) : null;
+  if (btn && fresh) {
+    // 혹시 기존 리스너가 남아있을 수 있으니 먼저 복제-치환으로 초기화
+    btn.parentNode.replaceChild(fresh, btn);
+  }
 
   const fi = document.getElementById('imgInput');
   const roiToggle = document.getElementById('roiToggle');
   const roiResetBtn = document.getElementById('roiResetBtn');
+  const resetBtn = document.getElementById('resetScanBtn');
   attachRoiCanvas();
 
   let activeFile = null;
   let ocrJobId = 0;
+
+  const resetScan = (clearFileInput = true) => {
+    ocrJobId++;
+    activeFile = null;
+    clearErr();
+    renderOcrRaw('');
+    const model = document.getElementById('modelInput');
+    if (model) model.value = '';
+    const result = document.getElementById('resultArea');
+    if (result) result.innerHTML = '';
+    if (roiToggle) roiToggle.checked = false;
+    resetRoi();
+    toggleRoiBox(false);
+    if (fi && clearFileInput) fi.value = '';
+    if (roiState.ctx && roiState.canvas) {
+      roiState.ctx.clearRect(0, 0, roiState.canvas.width || 0, roiState.canvas.height || 0);
+    }
+  };
 
   if (roiResetBtn) {
     roiResetBtn.addEventListener('click', () => {
       resetRoi();
       if (roiToggle) roiToggle.checked = false;
     });
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => resetScan(true));
   }
 
   if (fi) {
@@ -2698,6 +2728,8 @@ const attachOCR = () => {
       }
     });
   }
+
+  if (!fresh) return;
 
   fresh.addEventListener('click', async () => {
     const jobId = ++ocrJobId;
@@ -2894,12 +2926,14 @@ const attachOCR = () => {
         width: ((bbox.x1 ?? bbox.right ?? bbox.x0 || 0) - (bbox.x0 || bbox.left || 0)) * scaleX,
         height: ((bbox.y1 ?? bbox.bottom ?? bbox.y0 || 0) - (bbox.y0 || bbox.top || 0)) * scaleY,
       };
-      const marginX = box.width * 0.4;
-      const marginY = box.height * 1.6;
+      const marginX = Math.max(box.width * 0.25, 40);
+      const aboveMargin = Math.min(box.y, box.height * 0.35);
+      const roiHeight = roiState?.roi?.height ? roiState.roi.height / (roiState.scale || 1) : box.height;
+      const extraBelow = Math.min(fullCanvas.height - box.y - box.height, Math.max(roiHeight * 0.35, box.height * 0.35));
       const cropX = Math.max(0, box.x - marginX);
-      const cropY = Math.max(0, box.y - marginY * 0.3);
+      const cropY = Math.max(0, box.y - aboveMargin);
       const cropW = Math.min(fullCanvas.width - cropX, box.width + marginX * 2);
-      const cropH = Math.min(fullCanvas.height - cropY, box.height + marginY);
+      const cropH = Math.min(fullCanvas.height - cropY, box.height + aboveMargin + extraBelow);
 
       const cropped = cropCanvas(fullCanvas, { x: cropX, y: cropY, width: cropW, height: cropH });
       const variants = await Promise.all(generateOcrVariants(cropped, '정밀', { cacheKeyPrefix: `job${jobId}:fine` }));
@@ -3070,11 +3104,7 @@ const attachOCR = () => {
     await performAutoOcr();
 
     const coarseBest = pickBestModelVariant(modelCandidates);
-    if (coarseBest && coarseBest.unknown === 0) {
-      const applied = applyCandidateSelection(coarseBest, coarseBest.contexts || [], 'AUTO');
-      if (applied) return;
-    }
-    if (coarseBest && coarseBest.unknown !== 0) {
+    if (coarseBest) {
       await performFineOcr(coarseBest);
     }
 
@@ -3123,21 +3153,20 @@ const attachOCR = () => {
     });
   };
 
-// DOM 뒤에 붙도록 보강
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', attachOCR);
-} else {
-  attachOCR();
-}
-// ---- OCR 핸들러 교체 끝 ----
+  // DOM 뒤에 붙도록 보강
+  const initApp = () => {
+    attachOCR();
+    renderFamilyList();
+    if(currentKey) selectFamily(currentKey);
+  };
 
-
-
-
-  // 기본 렌더
-  renderFamilyList();
-  if(currentKey) selectFamily(currentKey);
-})();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
+  } else {
+    initApp();
+  }
+  // ---- OCR 핸들러 교체 끝 ----
+  })();
 </script>
 
 
