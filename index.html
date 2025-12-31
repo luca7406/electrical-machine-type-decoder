@@ -1077,11 +1077,12 @@
   </div>
 </div>
 
-<script>
-(() => {
-  const errBox = document.getElementById('err');
-  const showErr = (msg) => { errBox.textContent = msg; errBox.style.display='block'; };
-  const clearErr = () => { errBox.style.display='none'; errBox.textContent=''; };
+  <script>
+  (() => {
+    console.log("PARSE OK: script loaded");
+    const errBox = document.getElementById('err');
+    const showErr = (msg) => { errBox.textContent = msg; errBox.style.display='block'; };
+    const clearErr = () => { errBox.style.display='none'; errBox.textContent=''; };
 
   // 0) 데이터 로드
   const defaultFamilies = JSON.parse(document.getElementById('familyData').textContent || '{}');
@@ -1095,28 +1096,49 @@
     /AppleWebKit/.test(navigator.userAgent) &&
     (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 
-  const TESSERACT_BASE = './assets/tesseract';
-  const TESSERACT_WORKER_PATH = `${TESSERACT_BASE}/worker.min.js`;
-  const TESSERACT_CORE_PATH = `${TESSERACT_BASE}/tesseract-core.wasm.js`;
-  const TESSERACT_LANG_PATH = `${TESSERACT_BASE}/tessdata`;
+  const LOCAL_TESSERACT_SCRIPT = new URL('assets/tesseract/tesseract.min.js', location.href).toString();
+  const LOCAL_WORKER_PATH = new URL('assets/tesseract/worker.min.js', location.href).toString();
+  const LOCAL_CORE_PATH = new URL('assets/tesseract/tesseract-core.wasm.js', location.href).toString();
+  const LOCAL_LANG_PATH = new URL('assets/tesseract/tessdata', location.href).toString();
   const CDN_TESSERACT_SCRIPT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
   const CDN_WORKER_PATH = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js';
   const CDN_CORE_PATH = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core.wasm.js';
   const CDN_LANG_PATH = 'https://tessdata.projectnaptha.com/4.0.0';
 
-  let activeWorkerPath = TESSERACT_WORKER_PATH;
-  let activeCorePath = TESSERACT_CORE_PATH;
-  let activeLangPath = TESSERACT_LANG_PATH;
-  let cdnFallbackApplied = false;
+  let activeWorkerPath = CDN_WORKER_PATH;
+  let activeCorePath = CDN_CORE_PATH;
+  let activeLangPath = CDN_LANG_PATH;
+  let cdnFallbackApplied = true;
   let sharedWorkerPromise = null;
   let sharedWorkerInfo = null;
 
   const activateCdnFallback = () => {
-    if (cdnFallbackApplied) return;
     activeWorkerPath = CDN_WORKER_PATH;
     activeCorePath = CDN_CORE_PATH;
     activeLangPath = CDN_LANG_PATH;
     cdnFallbackApplied = true;
+  };
+
+  let localAssetCheckPromise = null;
+  const ensureLocalTesseractAssets = async () => {
+    if (localAssetCheckPromise) return localAssetCheckPromise;
+    localAssetCheckPromise = (async () => {
+      try {
+        const res = await fetch(LOCAL_WORKER_PATH, { method: 'HEAD', cache: 'no-store' });
+        if (res?.ok) {
+          activeWorkerPath = LOCAL_WORKER_PATH;
+          activeCorePath = LOCAL_CORE_PATH;
+          activeLangPath = LOCAL_LANG_PATH;
+          cdnFallbackApplied = false;
+          return true;
+        }
+      } catch (e) {
+        console.warn('로컬 Tesseract 자산 확인 실패', e);
+      }
+      activateCdnFallback();
+      return false;
+    })();
+    return localAssetCheckPromise;
   };
 
   // 옵션 파서
@@ -1358,53 +1380,70 @@
     }catch(e){ showErr('저장 실패: '+e.message); }
   }
 
-  // 4) 이벤트 바인딩 (모바일에서도 안정적으로 동작하도록)
-  document.getElementById('decodeBtn').addEventListener('click', decode);
-  document.getElementById('toggleSettingsBtn').addEventListener('click', ()=>{
-    const p=document.getElementById('settingsPanel');
-    p.style.display = (p.style.display==='none' || !p.style.display) ? 'block' : 'none';
-  });
-  document.getElementById('saveFamilyBtn').addEventListener('click', saveIntoFamilyDataScript);
-  document.getElementById('saveToDiskBtn').addEventListener('click', saveToDisk);
+  function bindUiEvents(){
+    try {
+      // 4) 이벤트 바인딩 (모바일에서도 안정적으로 동작하도록)
+      const decodeBtn = document.getElementById('decodeBtn');
+      const toggleSettingsBtn = document.getElementById('toggleSettingsBtn');
+      const saveFamilyBtn = document.getElementById('saveFamilyBtn');
+      const saveToDiskBtn = document.getElementById('saveToDiskBtn');
+      const addFamilyBtn = document.getElementById('addFamilyBtn');
+      const familyContainer = document.getElementById('familyContainer');
 
-  // 제품군 추가
-  document.getElementById('addFamilyBtn').addEventListener('click', ()=>{
-    const k = (document.getElementById('newFamilyKey').value || '').trim();
-    const d = (document.getElementById('newFamilyName').value || '').trim() || k;
-    if(!k) { alert('ID를 입력하세요.'); return; }
-    if(families[k]){ alert('이미 존재하는 ID입니다.'); return; }
-    families[k] = { display:d, storageKey:k, slotLens:[2], slotLabels:['슬롯0'], maps:[{}], optionMap:{} };
-    renderFamilyList();
-    selectFamily(k);
-    document.getElementById('newFamilyKey').value='';
-    document.getElementById('newFamilyName').value='';
-  });
+      if (decodeBtn) decodeBtn.addEventListener('click', decode);
+      if (toggleSettingsBtn) toggleSettingsBtn.addEventListener('click', ()=>{
+        const p=document.getElementById('settingsPanel');
+        if (!p) return;
+        p.style.display = (p.style.display==='none' || !p.style.display) ? 'block' : 'none';
+      });
+      if (saveFamilyBtn) saveFamilyBtn.addEventListener('click', saveIntoFamilyDataScript);
+      if (saveToDiskBtn) saveToDiskBtn.addEventListener('click', saveToDisk);
 
-  // 제품군 선택/삭제 (델리게이션)
-  document.getElementById('familyContainer').addEventListener('click', (e)=>{
-    const keySel = e.target.dataset.key;
-    const keyDel = e.target.dataset.delKey;
-    if(keySel){ selectFamily(keySel); }
-    else if(keyDel){
-      const keys = Object.keys(families);
-      if(keys.length<=1){ alert('최소 1개 제품군은 남아야 합니다.'); return; }
-      if(!confirm(`제품군 '${keyDel}'을(를) 삭제할까요?`)) return;
-      delete families[keyDel];
-      // 선택한 것이 지워졌다면 첫 제품군으로
-      if(currentKey === keyDel){
-        currentKey = Object.keys(families)[0] || null;
+      if (addFamilyBtn) {
+        addFamilyBtn.addEventListener('click', ()=>{
+          const k = (document.getElementById('newFamilyKey').value || '').trim();
+          const d = (document.getElementById('newFamilyName').value || '').trim() || k;
+          if(!k) { alert('ID를 입력하세요.'); return; }
+          if(families[k]){ alert('이미 존재하는 ID입니다.'); return; }
+          families[k] = { display:d, storageKey:k, slotLens:[2], slotLabels:['슬롯0'], maps:[{}], optionMap:{} };
+          renderFamilyList();
+          selectFamily(k);
+          document.getElementById('newFamilyKey').value='';
+          document.getElementById('newFamilyName').value='';
+        });
       }
-      renderFamilyList();
-      if(currentKey) selectFamily(currentKey);
-      else{
-        // 전부 없어지는 일은 없지만, 방어
-        document.getElementById('currentFamilyName').textContent='';
-        document.getElementById('slotConfig').innerHTML='';
-        document.getElementById('mappingEditors').innerHTML='';
-        document.getElementById('optionMapping').value='';
+
+      if (familyContainer) {
+        familyContainer.addEventListener('click', (e)=>{
+          const keySel = e.target.dataset.key;
+          const keyDel = e.target.dataset.delKey;
+          if(keySel){ selectFamily(keySel); }
+          else if(keyDel){
+            const keys = Object.keys(families);
+            if(keys.length<=1){ alert('최소 1개 제품군은 남아야 합니다.'); return; }
+            if(!confirm(`제품군 '${keyDel}'을(를) 삭제할까요?`)) return;
+            delete families[keyDel];
+            // 선택한 것이 지워졌다면 첫 제품군으로
+            if(currentKey === keyDel){
+              currentKey = Object.keys(families)[0] || null;
+            }
+            renderFamilyList();
+            if(currentKey) selectFamily(currentKey);
+            else{
+              // 전부 없어지는 일은 없지만, 방어
+              document.getElementById('currentFamilyName').textContent='';
+              document.getElementById('slotConfig').innerHTML='';
+              document.getElementById('mappingEditors').innerHTML='';
+              document.getElementById('optionMapping').value='';
+            }
+          }
+        });
       }
+    } catch (e) {
+      console.error('이벤트 바인딩 실패', e);
+      showErr('이벤트 초기화 실패: ' + (e.message || e));
     }
-  });
+  }
 
   // 슬롯 +/-
   document.getElementById('addSlotBtn').addEventListener('click', ()=>{
@@ -1507,14 +1546,19 @@ const loadScript = (src) => new Promise((res, rej) => {
 });
 
 async function ensureTesseract() {
+  await ensureLocalTesseractAssets();
   if (window.Tesseract) {
     if (!window.tesseract) window.tesseract = window.Tesseract;
     return window.Tesseract;
   }
   try {
-    await loadScript(`${TESSERACT_BASE}/tesseract.min.js`);
+    if (!cdnFallbackApplied) {
+      await loadScript(LOCAL_TESSERACT_SCRIPT);
+    } else {
+      await loadScript(CDN_TESSERACT_SCRIPT);
+    }
   } catch (e) {
-    console.warn('로컬 Tesseract 로드 실패, CDN으로 대체합니다.', e);
+    console.warn('주경로 Tesseract 로드 실패, CDN으로 대체합니다.', e);
     activateCdnFallback();
     await loadScript(CDN_TESSERACT_SCRIPT);
   }
@@ -1522,7 +1566,7 @@ async function ensureTesseract() {
     if (!window.tesseract) window.tesseract = window.Tesseract;
     return window.Tesseract;
   }
-  throw new Error('Tesseract 라이브러리 로드 실패 (로컬)');
+  throw new Error('Tesseract 라이브러리 로드 실패 (로컬/CDN)');
 }
 
 // 긴 네트워크/연산 지연에서 UI가 멈춘 것처럼 보이지 않도록 타임아웃을 건다.
@@ -1945,30 +1989,30 @@ function extractAuxTokensFromText(text, model) {
 
     for (const seq of gluedSource) {
       const tokens = splitAuxSequence(seq);
-      decomposition.push(`(${relation}) glued 원본: ${seq} -> ${tokens.join(', ') || '없음'}`
-);
-      
-for (const tok of tokens) {
-  // 원본 토큰은 그대로
-  pushToken(tok, 'glued', relation, seq);
+      decomposition.push(`(${relation}) glued 원본: ${seq} -> ${tokens.join(', ') || '없음'}`);
 
-  // ✅ O/0 변형 후보 추가
-  if (/[O0]/.test(tok)) {
-    const v1 = tok.replace(/O/g, '0'); // O -> 0
-    const v2 = tok.replace(/0/g, 'O'); // 0 -> O
+      for (const tok of tokens) {
+        // 원본 토큰은 그대로
+        pushToken(tok, 'glued', relation, seq);
 
-    if (v1 !== tok) pushToken(v1, 'glued:o0', relation, seq);
-    if (v2 !== tok) pushToken(v2, 'glued:0o', relation, seq);
+        // ✅ O/0 변형 후보 추가
+        if (/[O0]/.test(tok)) {
+          const v1 = tok.replace(/O/g, '0'); // O -> 0
+          const v2 = tok.replace(/0/g, 'O'); // 0 -> O
 
-    // (옵션) 숫자 옆 O만 0으로 바꾼 후보 (더 보수적)
-    const v3 = tok.replace(/(\d)O/g, '$10').replace(/O(\d)/g, '0$1');
-    if (v3 !== tok && v3 !== v1) pushToken(v3, 'glued:digitO0', relation, seq);
+          if (v1 !== tok) pushToken(v1, 'glued:o0', relation, seq);
+          if (v2 !== tok) pushToken(v2, 'glued:0o', relation, seq);
+
+          // (옵션) 숫자 옆 O만 0으로 바꾼 후보 (더 보수적)
+          const v3 = tok.replace(/(\d)O/g, '$10').replace(/O(\d)/g, '0$1');
+          if (v3 !== tok && v3 !== v1) pushToken(v3, 'glued:digitO0', relation, seq);
+        }
+      }
+    }
+  });
+
+    return { tokens: auxTokens, hasExp: expDetected, decomposition, modelLineIdx, usedLines };
   }
-}
-}
-
-  return { tokens: auxTokens, hasExp: expDetected, decomposition, modelLineIdx, usedLines };
-}
 
 function gatherAuxFromContexts(model, contexts) {
   const canonModel = (model || '').toUpperCase().replace(/[–—−]/g, '-').replace(/\s+/g, '');
@@ -2687,69 +2731,70 @@ async function cropRoiVariants(file) {
 }
 
 const attachOCR = () => {
-  const btn = document.getElementById('ocrBtn');
-  const fresh = btn ? btn.cloneNode(true) : null;
-  if (btn && fresh) {
-    // 혹시 기존 리스너가 남아있을 수 있으니 먼저 복제-치환으로 초기화
-    btn.parentNode.replaceChild(fresh, btn);
-  }
-
-  const fi = document.getElementById('imgInput');
-  const roiToggle = document.getElementById('roiToggle');
-  const roiResetBtn = document.getElementById('roiResetBtn');
-  const resetBtn = document.getElementById('resetScanBtn');
-  attachRoiCanvas();
-
-  let activeFile = null;
-  let ocrJobId = 0;
-
-  const resetScan = (clearFileInput = true) => {
-    ocrJobId++;
-    activeFile = null;
-    clearErr();
-    renderOcrRaw('');
-    const model = document.getElementById('modelInput');
-    if (model) model.value = '';
-    const result = document.getElementById('resultArea');
-    if (result) result.innerHTML = '';
-    if (roiToggle) roiToggle.checked = false;
-    resetRoi();
-    toggleRoiBox(false);
-    if (fi && clearFileInput) fi.value = '';
-    if (roiState.ctx && roiState.canvas) {
-      roiState.ctx.clearRect(0, 0, roiState.canvas.width || 0, roiState.canvas.height || 0);
+  try {
+    const btn = document.getElementById('ocrBtn');
+    const fresh = btn ? btn.cloneNode(true) : null;
+    if (btn && fresh) {
+      // 혹시 기존 리스너가 남아있을 수 있으니 먼저 복제-치환으로 초기화
+      btn.parentNode.replaceChild(fresh, btn);
     }
-  };
 
-  if (roiResetBtn) {
-    roiResetBtn.addEventListener('click', () => {
-      resetRoi();
+    const fi = document.getElementById('imgInput');
+    const roiToggle = document.getElementById('roiToggle');
+    const roiResetBtn = document.getElementById('roiResetBtn');
+    const resetBtn = document.getElementById('resetScanBtn');
+    attachRoiCanvas();
+
+    let activeFile = null;
+    let ocrJobId = 0;
+
+    const resetScan = (clearFileInput = true) => {
+      ocrJobId++;
+      activeFile = null;
+      clearErr();
+      renderOcrRaw('');
+      const model = document.getElementById('modelInput');
+      if (model) model.value = '';
+      const result = document.getElementById('resultArea');
+      if (result) result.innerHTML = '';
       if (roiToggle) roiToggle.checked = false;
-    });
-  }
-
-  if (resetBtn) {
-    resetBtn.addEventListener('click', () => resetScan(true));
-  }
-
-  if (fi) {
-    fi.addEventListener('change', async () => {
-      if (!fi.files?.length) { toggleRoiBox(false); return; }
-      try {
-        const prepared = await prepareImage(fi.files[0]);
-        activeFile = prepared || fi.files[0];
-        await loadPreviewImage(activeFile);
-        resetRoi();
-      } catch (e) {
-        console.error(e);
-        showErr('이미지 미리보기 로드 실패: ' + (e.message || e));
+      resetRoi();
+      toggleRoiBox(false);
+      if (fi && clearFileInput) fi.value = '';
+      if (roiState.ctx && roiState.canvas) {
+        roiState.ctx.clearRect(0, 0, roiState.canvas.width || 0, roiState.canvas.height || 0);
       }
-    });
-  }
+    };
 
-  if (!fresh) return;
+    if (roiResetBtn) {
+      roiResetBtn.addEventListener('click', () => {
+        resetRoi();
+        if (roiToggle) roiToggle.checked = false;
+      });
+    }
 
-  fresh.addEventListener('click', async () => {
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => resetScan(true));
+    }
+
+    if (fi) {
+      fi.addEventListener('change', async () => {
+        if (!fi.files?.length) { toggleRoiBox(false); return; }
+        try {
+          const prepared = await prepareImage(fi.files[0]);
+          activeFile = prepared || fi.files[0];
+          await loadPreviewImage(activeFile);
+          resetRoi();
+        } catch (e) {
+          console.error(e);
+          showErr('이미지 미리보기 로드 실패: ' + (e.message || e));
+        }
+      });
+    }
+
+    if (!fresh) return;
+
+    fresh.addEventListener('click', async () => {
     const jobId = ++ocrJobId;
     clearErr();
     const warnings = [];
@@ -2934,6 +2979,45 @@ const attachOCR = () => {
       fullCanvas.width = baseImageEl.width;
       fullCanvas.height = baseImageEl.height;
       fullCanvas.getContext('2d').drawImage(baseImageEl, 0, 0, fullCanvas.width, fullCanvas.height);
+
+      const imgWidth = fullCanvas.width;
+      const imgHeight = fullCanvas.height;
+      const hasRoiToggle = roiToggle?.checked;
+      const roi = hasRoiToggle ? roiState?.roi : null;
+      const safeScale = roiState?.scale && roiState.scale > 0 ? roiState.scale : 1;
+      const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+
+      let cropX = 0;
+      let cropY = 0;
+      let cropW = imgWidth;
+      let cropH = imgHeight;
+
+      if (
+        roi &&
+        Number.isFinite(roi.x) &&
+        Number.isFinite(roi.y) &&
+        Number.isFinite(roi.width) &&
+        Number.isFinite(roi.height) &&
+        roi.width > 4 &&
+        roi.height > 4
+      ) {
+        const rx = roi.x / safeScale;
+        const ry = roi.y / safeScale;
+        const rw = roi.width / safeScale;
+        const rh = roi.height / safeScale;
+
+        const clampedX = clamp(rx, 0, imgWidth);
+        const clampedY = clamp(ry, 0, imgHeight);
+        const clampedW = clamp(rw, 0, imgWidth - clampedX);
+        const clampedH = clamp(rh, 0, imgHeight - clampedY);
+
+        if (clampedW >= 1 && clampedH >= 1) {
+          cropX = clampedX;
+          cropY = clampedY;
+          cropW = clampedW;
+          cropH = clampedH;
+        }
+      }
 
       const bbox = anchorCtx.bbox;
 const scaleX = (anchorCtx.originalWidth || fullCanvas.width) / (anchorCtx.scaledWidth || anchorCtx.canvasWidth || fullCanvas.width);
@@ -3169,13 +3253,26 @@ const box = {
     showErr('OCR 실패: ' + msg + '\n(네트워크 연결을 확인하거나, ROI로 형명 줄을 지정해 다시 시도해주세요.)');
 
     });
-  };
+  } catch (e) {
+    console.error('OCR 초기화 실패', e);
+    showErr('OCR 초기화 실패: ' + (e.message || e));
+  }
+};
 
   // DOM 뒤에 붙도록 보강
   const initApp = () => {
-    attachOCR();
-    renderFamilyList();
-    if(currentKey) selectFamily(currentKey);
+      try {
+        bindUiEvents();
+        attachOCR();
+        renderFamilyList();
+        if(currentKey) selectFamily(currentKey);
+        console.log('init ok');
+        console.log('JS loaded OK');
+      } catch (e) {
+        console.error('init failed', e);
+        showErr('초기화 실패: ' + (e.message || e));
+        console.log('init failed');
+      }
   };
 
   if (document.readyState === 'loading') {
