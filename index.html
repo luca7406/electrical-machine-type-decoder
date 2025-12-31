@@ -2010,7 +2010,7 @@ function normalizeModelCandidate(s) {
     .trim();
 }
 
-function collectModelCandidates(rawText, label, pool) {
+function collectModelCandidates(rawText, label, pool, confidence = 0) {
   if (!rawText) return;
   const lines = (rawText || '')
     .split(/\r?\n/)
@@ -2034,7 +2034,8 @@ function collectModelCandidates(rawText, label, pool) {
         prefixBonus: MODEL_PREFIX_BONUS.test(model),
         hyphenCount,
         sources: [],
-        contexts: []
+        contexts: [],
+        bestConfidence: 0
       });
     }
     const entry = pool.get(model);
@@ -2042,6 +2043,7 @@ function collectModelCandidates(rawText, label, pool) {
     if (STRICT_MODEL_REGEX.test(model)) entry.strictHits += 1;
     if (!entry.sources.includes(label)) entry.sources.push(label);
     entry.contexts.push({ label, text: rawText });
+    entry.bestConfidence = Math.max(entry.bestConfidence || 0, confidence || 0);
   };
 
   for (const ln of lines) {
@@ -2063,29 +2065,62 @@ function generateModelSwapVariants(model) {
 
 function scoreModelVariant(entry, variant) {
   const normalized = normalizeModelCandidate(variant || entry.candidate);
-  const coreLen = normalized.replace(/-/g, '').length;
-  const strictHit = STRICT_MODEL_REGEX.test(normalized) ? 1 : 0;
-  const resolved = resolveAmbiguousO0(normalized);
-  let score = 0;
-  if (strictHit) score += 22;
-  if (entry.prefixBonus || MODEL_PREFIX_BONUS.test(normalized)) score += 6;
-  if (/^AS/.test(normalized)) score += 4;
-  if ((normalized.match(/-/g) || []).length >= 2) score += 5;
-  if (/[A-Z]/.test(normalized) && /\d/.test(normalized)) score += 4;
-  score += Math.max(0, 12 - Math.abs(coreLen - 10));
-  score += Math.max(0, (entry.count || 0) - 1) * 3;
-  score += (entry.strictHits || 0) * 2;
-  score -= (resolved.unknown || 0) * 8;
+  if (MODEL_STOP_WORDS.some(w => normalized.includes(w))) return null;
+
+  const raw = normalized.replace(/-/g, '');
+  const hyphenCount = (normalized.match(/-/g) || []).length;
+  const letters = (normalized.match(/[A-Z]/g) || []).length;
+  const digits = (normalized.match(/\d/g) || []).length;
+  const coreLen = raw.length;
+
+  const familyKey = detectFamily(raw);
+  const family = families[familyKey] || null;
+  let bestDecode = null;
+  let slotCandidateCount = 0;
+
+  if (family) {
+    const { slotCandidates, optionStr } = buildSlotCandidateSets(raw, family);
+    slotCandidateCount = slotCandidates.length;
+    const combos = cartesian(slotCandidates);
+    for (const slots of combos) {
+      const result = evaluateCombination(slots, optionStr, family);
+      if (!bestDecode || result.unknown < bestDecode.unknown || (result.unknown === bestDecode.unknown && result.score > bestDecode.score)) {
+        bestDecode = { ...result, model: applyHyphenTemplate(result.combined, normalized) };
+      }
+    }
+  }
+
+  const decodeUnknown = bestDecode?.unknown ?? (family ? (slotCandidateCount || 10) : 99);
+  const decodeScore = bestDecode?.score || 0;
+  const resolvedModel = bestDecode?.model || normalized;
+
+  let patternScore = 0;
+  patternScore += Math.max(0, 14 - Math.abs(coreLen - 10));
+  patternScore += Math.max(0, 6 - Math.max(0, hyphenCount - 2) * 3);
+  if (letters && digits) patternScore += 4;
+  if (hyphenCount === 2) patternScore += 3;
+  patternScore += decodeScore;
 
   return {
     ...entry,
-    candidate: resolved.resolved,
+    candidate: resolvedModel,
     rawVariant: normalized,
-    score,
-    unknown: resolved.unknown,
-    tried: resolved.tried,
-    strictHits: (entry.strictHits || 0) + strictHit,
+    unknown: decodeUnknown,
+    decodeScore,
+    patternScore,
+    familyHit: Boolean(familyKey),
+    confidence: entry.bestConfidence || 0,
+    tried: bestDecode?.rows ? bestDecode.rows.map(r => r[1]).filter(Boolean) : [normalized],
+    overallScore: patternScore,
   };
+}
+
+function compareCandidates(a, b) {
+  if ((a.unknown ?? 99) !== (b.unknown ?? 99)) return (a.unknown ?? 99) - (b.unknown ?? 99);
+  if (a.familyHit !== b.familyHit) return (b.familyHit ? 1 : 0) - (a.familyHit ? 1 : 0);
+  if ((a.patternScore || 0) !== (b.patternScore || 0)) return (b.patternScore || 0) - (a.patternScore || 0);
+  if ((a.confidence || 0) !== (b.confidence || 0)) return (b.confidence || 0) - (a.confidence || 0);
+  return (b.count || 0) - (a.count || 0);
 }
 
 function pickBestModelVariant(pool, extraEntry = null) {
@@ -2097,20 +2132,15 @@ function pickBestModelVariant(pool, extraEntry = null) {
     const swapVariants = generateModelSwapVariants(entry.candidate);
     for (const v of swapVariants) {
       const scored = scoreModelVariant(entry, v);
+      if (!scored) continue;
       const key = scored.candidate;
-      if (!variants.has(key) || variants.get(key).score < scored.score) {
+      if (!variants.has(key) || compareCandidates(scored, variants.get(key)) < 0) {
         variants.set(key, scored);
       }
     }
   }
 
-  const ranked = Array.from(variants.values()).sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    if ((a.unknown || 0) !== (b.unknown || 0)) return (a.unknown || 0) - (b.unknown || 0);
-    if ((b.strictHits || 0) !== (a.strictHits || 0)) return (b.strictHits || 0) - (a.strictHits || 0);
-    return (b.count || 0) - (a.count || 0);
-  });
-
+  const ranked = Array.from(variants.values()).sort(compareCandidates);
   return ranked[0] || null;
 }
 
@@ -2577,11 +2607,13 @@ const attachOCR = () => {
 
     const considerResult = (text, label, confidence = 0, poolTarget = modelCandidates) => {
       if (!text || isStale()) return;
-      collectModelCandidates(text, label, poolTarget);
+      collectModelCandidates(text, label, poolTarget, confidence);
       const localPool = new Map();
-      collectModelCandidates(text, label, localPool);
+      collectModelCandidates(text, label, localPool, confidence);
       const localBest = pickBestModelVariant(localPool);
-      const validity = (localBest?.score || 0) + (localBest?.strictHits ? 10 : 0);
+      const validity = localBest
+        ? (100 - (localBest.unknown || 0) * 10) + (localBest.patternScore || 0) + (localBest.familyHit ? 5 : 0)
+        : 0;
       const composite = (confidence || 0) + validity;
       if (!bestOcrResult || composite > bestOcrResult.composite) {
         bestOcrResult = {
@@ -2624,7 +2656,7 @@ const attachOCR = () => {
 
       const sourceList = (best.sources || []).join(', ');
       const debugSummary = `선택된 형명 후보: ${resolved.resolved}\n` +
-        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+        `패턴 점수: ${best.patternScore ?? 'N/A'} / 등장횟수: ${best.count} / 가족 식별: ${best.familyHit ? '예' : '아니오'}\n` +
         `unknown 슬롯: ${resolved.unknown ?? best.unknown ?? 'N/A'}\n` +
         `발견 위치: ${sourceList || 'N/A'}\n` +
         `O/0 보정: ${resolved.tried.join(' → ') || '없음'}`;
@@ -2801,6 +2833,7 @@ const attachOCR = () => {
       hyphenCount: (bestOcrResult.candidate.match(/-/g) || []).length,
       sources: [bestOcrResult.label],
       contexts: bestOcrResult.contexts || [],
+      bestConfidence: bestOcrResult.confidence || 0,
     } : null;
 
     const best = pickBestModelVariant(modelCandidates, extraEntry);
