@@ -2980,6 +2980,45 @@ const attachOCR = () => {
       fullCanvas.height = baseImageEl.height;
       fullCanvas.getContext('2d').drawImage(baseImageEl, 0, 0, fullCanvas.width, fullCanvas.height);
 
+      const imgWidth = fullCanvas.width;
+      const imgHeight = fullCanvas.height;
+      const hasRoiToggle = roiToggle?.checked;
+      const roi = hasRoiToggle ? roiState?.roi : null;
+      const safeScale = roiState?.scale && roiState.scale > 0 ? roiState.scale : 1;
+      const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+
+      let cropX = 0;
+      let cropY = 0;
+      let cropW = imgWidth;
+      let cropH = imgHeight;
+
+      if (
+        roi &&
+        Number.isFinite(roi.x) &&
+        Number.isFinite(roi.y) &&
+        Number.isFinite(roi.width) &&
+        Number.isFinite(roi.height) &&
+        roi.width > 4 &&
+        roi.height > 4
+      ) {
+        const rx = roi.x / safeScale;
+        const ry = roi.y / safeScale;
+        const rw = roi.width / safeScale;
+        const rh = roi.height / safeScale;
+
+        const clampedX = clamp(rx, 0, imgWidth);
+        const clampedY = clamp(ry, 0, imgHeight);
+        const clampedW = clamp(rw, 0, imgWidth - clampedX);
+        const clampedH = clamp(rh, 0, imgHeight - clampedY);
+
+        if (clampedW >= 1 && clampedH >= 1) {
+          cropX = clampedX;
+          cropY = clampedY;
+          cropW = clampedW;
+          cropH = clampedH;
+        }
+      }
+
       const bbox = anchorCtx.bbox;
 const scaleX = (anchorCtx.originalWidth || fullCanvas.width) / (anchorCtx.scaledWidth || anchorCtx.canvasWidth || fullCanvas.width);
 const scaleY = (anchorCtx.originalHeight || fullCanvas.height) / (anchorCtx.scaledHeight || anchorCtx.canvasHeight || fullCanvas.height);
