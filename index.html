@@ -1,10 +1,14 @@
 <!DOCTYPE html>
-<html lang="ko"><head>
+<html lang="ko">
+<head>
 <meta charset="UTF-8">
 <title>형명 판독기 - v7.6 (내장 저장)</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="preconnect" href="https://unpkg.com">
-<link rel="preconnect" href="https://tessdata.projectnaptha.com">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="형명 판독기">
+<meta name="theme-color" content="#1f1f3a">
 <style>
   :root { --gap:12px; --card:#fff; --bd:#d1d5db; --txt:#1f1f3a; --mut:#555; --bg:#f5f5f7; }
   * { box-sizing:border-box; }
@@ -39,7 +43,7 @@
     .row{flex-direction:column}
   }
 </style>
-<script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js" crossorigin="anonymous"></script>
+<script src="./assets/tesseract/tesseract.min.js"></script>
 </head>
 <body>
 <!-- 설정 JSON: 이 블록이 ‘저장’으로 갱신됩니다 -->
@@ -1086,6 +1090,31 @@
   // 1) 유틸
   const q = (s) => document.querySelector(s);
   const qa = (s) => Array.from(document.querySelectorAll(s));
+  const isIOSWebKit =
+    /AppleWebKit/.test(navigator.userAgent) &&
+    (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+  const TESSERACT_BASE = './assets/tesseract';
+  const TESSERACT_WORKER_PATH = `${TESSERACT_BASE}/worker.min.js`;
+  const TESSERACT_CORE_PATH = `${TESSERACT_BASE}/tesseract-core.wasm.js`;
+  const TESSERACT_LANG_PATH = `${TESSERACT_BASE}/tessdata`;
+  const CDN_TESSERACT_SCRIPT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
+  const CDN_WORKER_PATH = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js';
+  const CDN_CORE_PATH = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core.wasm.js';
+  const CDN_LANG_PATH = 'https://tessdata.projectnaptha.com/4.0.0';
+
+  let activeWorkerPath = TESSERACT_WORKER_PATH;
+  let activeCorePath = TESSERACT_CORE_PATH;
+  let activeLangPath = TESSERACT_LANG_PATH;
+  let cdnFallbackApplied = false;
+
+  const activateCdnFallback = () => {
+    if (cdnFallbackApplied) return;
+    activeWorkerPath = CDN_WORKER_PATH;
+    activeCorePath = CDN_CORE_PATH;
+    activeLangPath = CDN_LANG_PATH;
+    cdnFallbackApplied = true;
+  };
 
   // 옵션 파서
   const defaultOptDesc = { AL:'AL1 + MRB', A1:'MRB + RES', A2:'AL2 + MRB', B:'Counter', C:'Count Reset', K:'Key Lock', CS2:'Charge 통신' };
@@ -1427,24 +1456,31 @@ function extractModel(text) {
 }
 
   // ---- OCR 핸들러 교체 시작 ----
+const loadScript = (src) => new Promise((res, rej) => {
+  const s = document.createElement('script');
+  s.src = src;
+  s.onload = res;
+  s.onerror = rej;
+  document.head.appendChild(s);
+});
+
 async function ensureTesseract() {
   if (window.Tesseract) {
     if (!window.tesseract) window.tesseract = window.Tesseract;
     return window.Tesseract;
   }
-  // 1차: jsDelivr
-  await new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js';
-    s.crossOrigin = 'anonymous';
-    s.onload = res; s.onerror = rej;
-    document.head.appendChild(s);
-  });
+  try {
+    await loadScript(`${TESSERACT_BASE}/tesseract.min.js`);
+  } catch (e) {
+    console.warn('로컬 Tesseract 로드 실패, CDN으로 대체합니다.', e);
+    activateCdnFallback();
+    await loadScript(CDN_TESSERACT_SCRIPT);
+  }
   if (window.Tesseract) {
     if (!window.tesseract) window.tesseract = window.Tesseract;
     return window.Tesseract;
   }
-  throw new Error('Tesseract 라이브러리 로드 실패');
+  throw new Error('Tesseract 라이브러리 로드 실패 (로컬)');
 }
 
 // 긴 네트워크/연산 지연에서 UI가 멈춘 것처럼 보이지 않도록 타임아웃을 건다.
@@ -2203,16 +2239,9 @@ const attachOCR = () => {
 
     if (!fi?.files?.length || !activeFile) { alert('이미지를 선택해주세요.'); return; }
 
-    // 환경 감지
-    const isIOSWebKit =
-      /AppleWebKit/.test(navigator.userAgent) &&
-      (/iPhone|iPad|iPod|Mobile/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
-
-    // iOS Edge/Safari에서 외부 워커가 막힐 경우를 대비해 blob/외부 워커 2단계로 시도
-    const primaryBlob = (location.protocol === 'file:') ? true : !isIOSWebKit;
-    const attempts = [];
-    attempts.push(primaryBlob);
-    if (!attempts.includes(!primaryBlob)) attempts.push(!primaryBlob);
+    // WebKit(iOS)에서 Web Worker 제약을 우선 고려하여 blob 워커를 먼저 시도한다.
+    const preferBlobWorker = location.protocol === 'file:' ? true : isIOSWebKit;
+    const attempts = preferBlobWorker ? [true, false] : [false, true];
 
     let lastErr = null;
     let lastRawText = '';
@@ -2252,9 +2281,9 @@ const attachOCR = () => {
               'eng',
               undefined,
               {
-                workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-                corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
-                langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+                workerPath: activeWorkerPath,
+                corePath: activeCorePath,
+                langPath: activeLangPath,
                 workerBlobURL: useBlobWorker
               }
             ),
@@ -2289,6 +2318,11 @@ const attachOCR = () => {
         } catch (e) {
           lastErr = e;
           console.error('OCR 실패, useBlobWorker=', useBlobWorker, e);
+          if (!cdnFallbackApplied) {
+            activateCdnFallback();
+            console.warn('로컬 워커 로드 실패, CDN 경로로 재시도합니다.');
+            continue;
+          }
         } finally {
           setBusy(false);
           try { await worker?.terminate(); } catch (_) {}
@@ -2315,9 +2349,9 @@ const attachOCR = () => {
               'eng',
               undefined,
               {
-                workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
-                corePath: 'https://unpkg.com/tesseract.js-core@5.1.0',
-                langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+                workerPath: activeWorkerPath,
+                corePath: activeCorePath,
+                langPath: activeLangPath,
                 workerBlobURL: useBlobWorker
               }
             ),
@@ -2378,6 +2412,11 @@ const attachOCR = () => {
         } catch (e) {
           lastErr = e;
           console.error('ROI OCR 실패, useBlobWorker=', useBlobWorker, e);
+          if (!cdnFallbackApplied) {
+            activateCdnFallback();
+            console.warn('ROI 워커 로드 실패, CDN 경로로 재시도합니다.');
+            continue;
+          }
         } finally {
           setBusy(false);
           try { await worker?.terminate(); } catch (_) {}
