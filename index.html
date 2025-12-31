@@ -43,7 +43,7 @@
     .row{flex-direction:column}
   }
 </style>
-<script src="./assets/tesseract/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
 <!-- 설정 JSON: 이 블록이 ‘저장’으로 갱신됩니다 -->
@@ -2918,22 +2918,22 @@ const attachOCR = () => {
       fullCanvas.getContext('2d').drawImage(baseImageEl, 0, 0, fullCanvas.width, fullCanvas.height);
 
       const bbox = anchorCtx.bbox;
-      const scaleX = (anchorCtx.originalWidth || fullCanvas.width) / (anchorCtx.scaledWidth || anchorCtx.canvasWidth || fullCanvas.width);
-      const scaleY = (anchorCtx.originalHeight || fullCanvas.height) / (anchorCtx.scaledHeight || anchorCtx.canvasHeight || fullCanvas.height);
-      const box = {
-        x: (bbox.x0 || bbox.left || 0) * scaleX,
-        y: (bbox.y0 || bbox.top || 0) * scaleY,
-        width: ((bbox.x1 ?? bbox.right ?? bbox.x0 || 0) - (bbox.x0 || bbox.left || 0)) * scaleX,
-        height: ((bbox.y1 ?? bbox.bottom ?? bbox.y0 || 0) - (bbox.y0 || bbox.top || 0)) * scaleY,
-      };
-      const marginX = Math.max(box.width * 0.25, 40);
-      const aboveMargin = Math.min(box.y, box.height * 0.35);
-      const roiHeight = roiState?.roi?.height ? roiState.roi.height / (roiState.scale || 1) : box.height;
-      const extraBelow = Math.min(fullCanvas.height - box.y - box.height, Math.max(roiHeight * 0.35, box.height * 0.35));
-      const cropX = Math.max(0, box.x - marginX);
-      const cropY = Math.max(0, box.y - aboveMargin);
-      const cropW = Math.min(fullCanvas.width - cropX, box.width + marginX * 2);
-      const cropH = Math.min(fullCanvas.height - cropY, box.height + aboveMargin + extraBelow);
+const scaleX = (anchorCtx.originalWidth || fullCanvas.width) / (anchorCtx.scaledWidth || anchorCtx.canvasWidth || fullCanvas.width);
+const scaleY = (anchorCtx.originalHeight || fullCanvas.height) / (anchorCtx.scaledHeight || anchorCtx.canvasHeight || fullCanvas.height);
+
+// ✅ use ONLY ?? here (no || mixed with ??)
+const x0 = (bbox?.x0 ?? bbox?.left ?? 0);
+const y0 = (bbox?.y0 ?? bbox?.top ?? 0);
+const x1 = (bbox?.x1 ?? bbox?.right ?? x0);
+const y1 = (bbox?.y1 ?? bbox?.bottom ?? y0);
+
+const box = {
+  x: x0 * scaleX,
+  y: y0 * scaleY,
+  width: Math.max(0, (x1 - x0)) * scaleX,
+  height: Math.max(0, (y1 - y0)) * scaleY,
+};
+
 
       const cropped = cropCanvas(fullCanvas, { x: cropX, y: cropY, width: cropW, height: cropH });
       const variants = await Promise.all(generateOcrVariants(cropped, '정밀', { cacheKeyPrefix: `job${jobId}:fine` }));
