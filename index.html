@@ -1500,48 +1500,118 @@ const NAMEPLATE_TOP_RATIO_PRIMARY = 0.45;
 const NAMEPLATE_TOP_RATIO_SECONDARY = 0.55;
 const NAMEPLATE_TOP_RATIOS = [0.45, 0.55, 0.7, 0.85, 1.0];
 const OCR_UPSCALE_FACTOR = 2;
-const OCR_CONTRAST_BOOST = 1.6;
 const OCR_THRESHOLD = 170;
 const MAX_PREVIEW_WIDTH = 640;
 const MAX_PREVIEW_HEIGHT = 420;
 
+function createUpscaledCanvas(source, scale = 1) {
+  const target = document.createElement('canvas');
+  target.width = Math.max(1, Math.round(source.width * scale));
+  target.height = Math.max(1, Math.round(source.height * scale));
+  const ctx = target.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, target.width, target.height);
+  return target;
+}
+
+function getPercentileBounds(grayValues, lowPct = 2, highPct = 98) {
+  const hist = new Array(256).fill(0);
+  for (const v of grayValues) hist[v] += 1;
+  const total = grayValues.length;
+  const lowTarget = Math.max(0, Math.min(total - 1, Math.floor((lowPct / 100) * total)));
+  const highTarget = Math.max(0, Math.min(total - 1, Math.floor((highPct / 100) * total)));
+
+  let low = 0, acc = 0;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= lowTarget) { low = i; break; } }
+
+  let high = 255; acc = 0;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= highTarget) { high = i; break; } }
+
+  if (high <= low) { high = Math.min(255, low + 1); }
+  return { low, high };
+}
+
+function applySharpen(grayValues, width, height) {
+  const kernel = [
+    0, -1, 0,
+    -1, 5, -1,
+    0, -1, 0
+  ];
+  const output = new Uint8ClampedArray(grayValues.length);
+  const idx = (x, y) => (y * width + x);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let acc = 0;
+      let k = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const nx = Math.min(width - 1, Math.max(0, x + kx));
+          const ny = Math.min(height - 1, Math.max(0, y + ky));
+          acc += grayValues[idx(nx, ny)] * kernel[k++];
+        }
+      }
+      output[idx(x, y)] = Math.max(0, Math.min(255, acc));
+    }
+  }
+  return output;
+}
+
 async function preprocessCroppedCanvas(canvas, {
   upscaleFactor = OCR_UPSCALE_FACTOR,
-  contrast = OCR_CONTRAST_BOOST,
-  threshold = OCR_THRESHOLD
+  contrastLowPercent = 2,
+  contrastHighPercent = 98,
+  gamma = 1.0,
+  threshold = OCR_THRESHOLD,
+  sharpen = false,
 } = {}) {
   if (!canvas) return null;
 
-  const target = document.createElement('canvas');
-  target.width = Math.max(1, Math.round(canvas.width * upscaleFactor));
-  target.height = Math.max(1, Math.round(canvas.height * upscaleFactor));
-
+  const target = createUpscaledCanvas(canvas, upscaleFactor);
   const ctx = target.getContext('2d');
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, target.width, target.height);
+  const { width, height } = target;
 
-  const imgData = ctx.getImageData(0, 0, target.width, target.height);
+  const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
-  const clamp = v => Math.max(0, Math.min(255, v));
 
-  for (let i = 0; i < data.length; i += 4) {
+  const grayValues = new Uint8ClampedArray(width * height);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    // Grayscale
-    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    // Contrast boost
-    gray = (gray - 128) * contrast + 128;
-    gray = clamp(gray);
-    // Threshold to binary
-    const bin = gray >= threshold ? 255 : 0;
+    grayValues[p] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+  }
+
+  const { low, high } = getPercentileBounds(grayValues, contrastLowPercent, contrastHighPercent);
+  const range = Math.max(1, high - low);
+
+  let adjusted = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < grayValues.length; i++) {
+    const norm = Math.max(0, Math.min(1, (grayValues[i] - low) / range));
+    adjusted[i] = Math.round(Math.pow(norm, gamma) * 255);
+  }
+
+  if (sharpen) {
+    adjusted = applySharpen(adjusted, width, height);
+  }
+
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const v = adjusted[p];
+    const bin = typeof threshold === 'number' ? (v >= threshold ? 255 : 0) : v;
     data[i] = data[i + 1] = data[i + 2] = bin;
     data[i + 3] = 255;
   }
 
   ctx.putImageData(imgData, 0, 0);
+  return target;
+}
 
-  return await new Promise((resolve, reject) => {
-    target.toBlob(b => b ? resolve(b) : reject(new Error('이미지 전처리 실패')), 'image/png', 1);
-  });
+function generateOcrVariants(canvas, baseLabel = '') {
+  if (!canvas) return [];
+  const presets = [
+    { label: `${baseLabel}·표준`, contrastLowPercent: 2, contrastHighPercent: 98, gamma: 1.0, threshold: 175, sharpen: false },
+    { label: `${baseLabel}·샤프`, contrastLowPercent: 1, contrastHighPercent: 99, gamma: 0.95, threshold: 165, sharpen: true },
+    { label: `${baseLabel}·고대비`, contrastLowPercent: 0.5, contrastHighPercent: 99.5, gamma: 1.1, threshold: 150, sharpen: false },
+  ];
+  return presets.map(opts => preprocessCroppedCanvas(canvas, opts)
+    .then(cv => ({ label: opts.label, canvas: cv })));
 }
 
 async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
@@ -1568,7 +1638,9 @@ async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
 
-  return await preprocessCroppedCanvas(canvas);
+  const label = `상단 ${Math.round(topRatio * 100)}%`;
+  const variants = await Promise.all(generateOcrVariants(canvas, label));
+  return { label, variants };
 }
 
 function normalizeNameplateText(text) {
@@ -1997,6 +2069,92 @@ function pickBestModelCandidate(pool) {
   return scored[0] || null;
 }
 
+function inferSlotTypes(family) {
+  const maps = (family && Array.isArray(family.maps)) ? family.maps : [];
+  const lens = Array.isArray(family?.slotLens) ? family.slotLens : [];
+  return lens.map((_, idx) => {
+    const entries = Object.keys(maps[idx] || {}).filter(Boolean);
+    if (!entries.length) return 'mixed';
+    const digitRatio = entries.filter(k => /^\d+$/.test(k)).length / entries.length;
+    const alphaRatio = entries.filter(k => /^[A-Z]+$/.test(k)).length / entries.length;
+    if (digitRatio >= 0.6) return 'numeric';
+    if (alphaRatio >= 0.6) return 'alpha';
+    return 'mixed';
+  });
+}
+
+function applyHyphenTemplate(raw, template) {
+  let res = '';
+  let idx = 0;
+  for (const ch of template) {
+    if (ch === '-') res += '-';
+    else res += raw[idx++] || '';
+  }
+  if (idx < raw.length) res += raw.slice(idx);
+  return res;
+}
+
+function resolveAmbiguousO0(model) {
+  const normalized = normalizeModelCandidate(model || '');
+  const template = normalized || model || '';
+  const raw = normalized.replace(/-/g, '');
+  const famKey = detectFamily(raw);
+  const family = families[famKey] || {};
+  const lens = Array.isArray(family.slotLens) ? family.slotLens : [];
+  const slotTypes = inferSlotTypes(family);
+
+  const chars = raw.split('');
+  const tried = [];
+  let cursor = 0;
+  for (let i = 0; i < lens.length && cursor < chars.length; i++) {
+    if (i === lens.length - 1) break; // 옵션 영역은 남겨둔다
+    const len = lens[i] || 0;
+    const slotType = slotTypes[i] || 'mixed';
+    for (let j = 0; j < len && (cursor + j) < chars.length; j++) {
+      const idx = cursor + j;
+      const ch = chars[idx];
+      if (slotType === 'numeric' && ch === 'O') { chars[idx] = '0'; tried.push(`O@${idx}->0`); }
+      else if (slotType === 'alpha' && ch === '0') { chars[idx] = 'O'; tried.push(`0@${idx}->O`); }
+    }
+    cursor += len;
+  }
+
+  const ambiguousIndexes = [];
+  cursor = 0;
+  for (let i = 0; i < lens.length && cursor < chars.length; i++) {
+    if (i === lens.length - 1) break;
+    const len = lens[i] || 0;
+    const slotType = slotTypes[i] || 'mixed';
+    for (let j = 0; j < len && (cursor + j) < chars.length; j++) {
+      const idx = cursor + j;
+      if (slotType === 'mixed' && (chars[idx] === '0' || chars[idx] === 'O')) ambiguousIndexes.push(idx);
+    }
+    cursor += len;
+  }
+
+  const candidates = [chars.join('')];
+  if (ambiguousIndexes.length) {
+    const flipped = [...chars];
+    ambiguousIndexes.forEach(idx => { flipped[idx] = flipped[idx] === '0' ? 'O' : '0'; });
+    candidates.push(flipped.join(''));
+  }
+
+  const scoreVariant = (rawCandidate) => {
+    const candidateWithHyphen = applyHyphenTemplate(rawCandidate, template);
+    const strict = STRICT_MODEL_REGEX.test(candidateWithHyphen) ? 30 : 0;
+    const fam = families[detectFamily(rawCandidate)] || {};
+    const lensList = Array.isArray(fam.slotLens) ? fam.slotLens : [];
+    const minLen = lensList.slice(0, -1).reduce((a, b) => a + (b || 0), 0);
+    const lenScore = rawCandidate.length >= minLen ? 15 : 0;
+    const digitScore = /\d/.test(rawCandidate) ? 3 : 0;
+    const alphaScore = /[A-Z]/.test(rawCandidate) ? 3 : 0;
+    return { model: candidateWithHyphen, score: strict + lenScore + digitScore + alphaScore };
+  };
+
+  const scored = candidates.map(scoreVariant).sort((a, b) => b.score - a.score);
+  return { resolved: scored[0]?.model || template, tried: scored.map(s => s.model) };
+}
+
 // iOS Safari에서 메모리 부족으로 워커가 중단되는 문제를 줄이기 위해
 // 업로드 이미지를 적당히 리사이즈해서 전달한다.
 async function prepareImage(file) {
@@ -2177,7 +2335,7 @@ function resetRoi() {
   updateRoiInfo('ROI 미선택');
 }
 
-async function cropRoiToBlob(file) {
+async function cropRoiVariants(file) {
   const { roi, img, scale } = roiState;
   if (!roi || !img || roi.width < 4 || roi.height < 4) return null;
   const realScale = scale || 1;
@@ -2190,7 +2348,9 @@ async function cropRoiToBlob(file) {
   canvas.height = Math.max(1, Math.round(sh));
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-  return preprocessCroppedCanvas(canvas);
+  const label = roi ? `ROI ${Math.round(sw)}x${Math.round(sh)}` : 'ROI';
+  const variants = await Promise.all(generateOcrVariants(canvas, label));
+  return { label, variants };
 }
 
 const attachOCR = () => {
@@ -2206,6 +2366,7 @@ const attachOCR = () => {
   attachRoiCanvas();
 
   let activeFile = null;
+  let ocrJobId = 0;
 
   if (roiResetBtn) {
     roiResetBtn.addEventListener('click', () => {
@@ -2230,12 +2391,17 @@ const attachOCR = () => {
   }
 
   fresh.addEventListener('click', async () => {
+    const jobId = ++ocrJobId;
     clearErr();
+    const warnings = [];
+    const warn = (msg) => { if (msg) warnings.push(msg); console.warn(msg); };
     const origLabel = fresh.textContent;
     const setBusy = (busy, label = '인식 중...') => {
+      if (jobId !== ocrJobId) return;
       fresh.disabled = busy;
       fresh.textContent = busy ? label : origLabel;
     };
+    const isStale = () => jobId !== ocrJobId;
 
     if (!fi?.files?.length || !activeFile) { alert('이미지를 선택해주세요.'); return; }
 
@@ -2246,7 +2412,9 @@ const attachOCR = () => {
     let lastErr = null;
     let lastRawText = '';
     const rawLogs = [];
+    let bestOcrResult = null;
     const appendRawLog = (label, text) => {
+      if (isStale()) return;
       const entry = `[${label}]\n${(text || '').trim()}`;
       rawLogs.push(entry);
       const combined = rawLogs.join('\n\n');
@@ -2263,11 +2431,74 @@ const attachOCR = () => {
     const psmModes = ['7', '6'];
     const modelCandidates = new Map();
 
+    const considerResult = (text, label, confidence = 0, poolTarget = modelCandidates) => {
+      if (!text || isStale()) return;
+      collectModelCandidates(text, label, poolTarget);
+      const localPool = new Map();
+      collectModelCandidates(text, label, localPool);
+      const localBest = pickBestModelCandidate(localPool);
+      const validity = (localBest?.score || 0) + (localBest?.strictHits ? 10 : 0);
+      const composite = (confidence || 0) + validity;
+      if (!bestOcrResult || composite > bestOcrResult.composite) {
+        bestOcrResult = {
+          text,
+          label,
+          confidence: confidence || 0,
+          candidate: localBest?.candidate || '',
+          contexts: localBest?.contexts || [],
+          composite
+        };
+      }
+    };
+
     const getCrop = async (ratio) => {
       if (!cropCache.has(ratio)) {
         cropCache.set(ratio, await cropTopRegion(sourceImage, ratio));
       }
       return cropCache.get(ratio);
+    };
+
+    const applyCandidateSelection = (best, contexts, prefixLabel = '') => {
+      if (!best || isStale()) return false;
+      const resolved = resolveAmbiguousO0(best.candidate);
+      const auxResult = gatherAuxFromContexts(resolved.resolved, contexts || []);
+      const parts = [resolved.resolved];
+      if (auxResult.aux.length) parts.push(...auxResult.aux);
+      if (auxResult.expDetected) parts.push('EXP');
+
+      const combined = parts.join(' ').trim();
+      try {
+        if (!isStale()) document.getElementById('modelInput').value = combined;
+      } catch (e) { warn('모델 입력 갱신 실패: ' + (e.message || e)); }
+
+      try {
+        if (!isStale()) decode();
+      } catch (e) {
+        warn('디코드 중 문제가 발생했지만 OCR 텍스트는 표시합니다. ' + (e.message || e));
+        showErr('디코드 중 문제가 발생했습니다. (OCR 결과는 유지됨)');
+      }
+
+      const sourceList = (best.sources || []).join(', ');
+      const debugSummary = `선택된 형명 후보: ${resolved.resolved}\n` +
+        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
+        `발견 위치: ${sourceList || 'N/A'}\n` +
+        `O/0 보정: ${resolved.tried.join(' → ') || '없음'}`;
+      const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
+        `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
+        `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
+        `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
+        `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
+        `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
+        `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
+        `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
+        `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
+      appendRawLog(prefixLabel ? `${prefixLabel} aux/EXP` : 'aux/EXP', auxDetail);
+      appendRawLog(prefixLabel ? `${prefixLabel} 모델 선택` : '모델 선택', debugSummary);
+      appendRawLog(prefixLabel ? `${prefixLabel} 최종 선택` : '최종 선택', `${combined}\n출처: ${sourceList || 'N/A'}`);
+      if (warnings.length && !isStale()) {
+        showErr('경고: ' + warnings.join(' / '));
+      }
+      return true;
     };
 
     const performAutoOcr = async () => {
@@ -2293,26 +2524,29 @@ const attachOCR = () => {
 
           for (const variant of cropVariants) {
             const cropped = await getCrop(variant.ratio);
-            if (!cropped) continue;
+            const enhancedList = cropped?.variants || [];
+            for (const enhanced of enhancedList) {
+              const enhancedCanvas = await enhanced.canvas;
+              if (!enhancedCanvas) continue;
+              for (const mode of psmModes) {
+                await withTimeout(worker.setParameters({
+                  tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+                  preserve_interword_spaces: '1',
+                  user_defined_dpi: '300',
+                  tessedit_pageseg_mode: mode,
+                }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM ${mode}, ${enhanced.label})`);
 
-            for (const mode of psmModes) {
-              await withTimeout(worker.setParameters({
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-                preserve_interword_spaces: '1',
-                user_defined_dpi: '300',
-                tessedit_pageseg_mode: mode,
-              }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM ${mode}, ${variant.label})`);
+                const { data: { text, confidence } } = await withTimeout(
+                  worker.recognize(enhancedCanvas),
+                  15000,
+                  `이미지 인식이 오래 걸립니다. (${enhanced.label}, PSM ${mode}) 사진 해상도를 낮추거나 네트워크 상태를 확인해주세요.`
+                );
 
-              const { data: { text } } = await withTimeout(
-                worker.recognize(cropped),
-                15000,
-                `이미지 인식이 오래 걸립니다. (${variant.label}, PSM ${mode}) 사진 해상도를 낮추거나 네트워크 상태를 확인해주세요.`
-              );
-
-              const rawText = text || '';
-              const attemptLabel = `${variant.label}, PSM ${mode}`;
-              appendRawLog(attemptLabel, rawText);
-              collectModelCandidates(rawText, attemptLabel, modelCandidates);
+                const rawText = text || '';
+                const attemptLabel = `${enhanced.label}, PSM ${mode}`;
+                appendRawLog(attemptLabel, rawText);
+                considerResult(rawText, attemptLabel, confidence, modelCandidates);
+              }
             }
           }
         } catch (e) {
@@ -2331,12 +2565,11 @@ const attachOCR = () => {
     };
 
     const performRoiOcr = async () => {
-      const roiBlob = await cropRoiToBlob(sourceImage);
-      if (!roiBlob) {
+      const roiData = await cropRoiVariants(sourceImage);
+      if (!roiData) {
         alert('ROI를 먼저 드래그로 지정해주세요.');
         return false;
       }
-      const roiLabel = roiState.roi ? `ROI ${Math.round(roiState.roi.width)}x${Math.round(roiState.roi.height)}` : 'ROI';
       for (const useBlobWorker of attempts) {
         const roiPool = new Map();
         const roiContexts = [];
@@ -2367,47 +2600,26 @@ const attachOCR = () => {
               tessedit_pageseg_mode: mode,
             }), 8000, `ROI OCR 파라미터 설정 지연 (PSM ${mode})`);
 
-            const { data: { text } } = await withTimeout(
-              worker.recognize(roiBlob),
-              12000,
-              `ROI 인식 지연 (PSM ${mode})`
-            );
+            for (const enhanced of roiData.variants || []) {
+              const enhancedCanvas = await enhanced.canvas;
+              if (!enhancedCanvas) continue;
+              const { data: { text, confidence } } = await withTimeout(
+                worker.recognize(enhancedCanvas),
+                12000,
+                `ROI 인식 지연 (${enhanced.label}, PSM ${mode})`
+              );
 
-            const rawText = text || '';
-            const label = `${roiLabel}, PSM ${mode}`;
-            appendRawLog(label, rawText);
-            collectModelCandidates(rawText, label, roiPool);
-            roiContexts.push({ label, text: rawText });
+              const rawText = text || '';
+              const label = `${enhanced.label}, PSM ${mode}`;
+              appendRawLog(label, rawText);
+              considerResult(rawText, label, confidence, roiPool);
+              roiContexts.push({ label, text: rawText });
+            }
           }
 
           const best = pickBestModelCandidate(roiPool);
           if (best && STRICT_MODEL_REGEX.test(best.candidate)) {
-            const auxResult = gatherAuxFromContexts(best.candidate, roiContexts);
-            const parts = [best.candidate];
-            if (auxResult.aux.length) parts.push(...auxResult.aux);
-            if (auxResult.expDetected) parts.push('EXP');
-
-            const combined = parts.join(' ').trim();
-            document.getElementById('modelInput').value = combined;
-            decode();
-
-            const sourceList = (best.sources || []).join(', ');
-            const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
-              `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
-              `발견 위치: ${sourceList || 'N/A'}`;
-            const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
-              `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
-              `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
-              `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
-              `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
-              `선택된 aux: ${(auxResult.debug.selected || []).join(' | ') || '없음'}\n` +
-              `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
-              `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
-              `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
-            appendRawLog('선택된 aux/EXP (ROI)', auxDetail);
-            appendRawLog('ROI 모델 선택', debugSummary);
-            appendRawLog('ROI 최종 선택', `${combined}\n출처: ${sourceList || 'N/A'}`);
-            return true;
+            return applyCandidateSelection(best, roiContexts, 'ROI');
           }
         } catch (e) {
           lastErr = e;
@@ -2436,34 +2648,15 @@ const attachOCR = () => {
 
     await performAutoOcr();
 
-    const best = pickBestModelCandidate(modelCandidates);
+    let best = pickBestModelCandidate(modelCandidates);
+    if (bestOcrResult?.candidate) {
+      const confidentPick = { ...bestOcrResult, candidate: bestOcrResult.candidate, sources: [bestOcrResult.label], count: 1, strictHits: 0, score: bestOcrResult.composite };
+      if (!best || confidentPick.score >= (best.score || 0)) best = confidentPick;
+    }
     if (best) {
       const contextsForBest = Array.isArray(best.contexts) ? best.contexts : [];
-      const auxResult = gatherAuxFromContexts(best.candidate, contextsForBest);
-      const parts = [best.candidate];
-      if (auxResult.aux.length) parts.push(...auxResult.aux);
-      if (auxResult.expDetected) parts.push('EXP');
-
-      const combined = parts.join(' ').trim();
-      document.getElementById('modelInput').value = combined;
-      decode();
-
-      const sourceList = (best.sources || []).join(', ');
-      const debugSummary = `선택된 형명 후보: ${best.candidate}\n` +
-        `점수: ${best.score} / 등장횟수: ${best.count} / 엄격 매치: ${best.strictHits}\n` +
-        `발견 위치: ${sourceList || 'N/A'}`;
-      const auxDetail = `aux: ${auxResult.aux.join(', ') || 'N/A'}\n` +
-        `EXP: ${auxResult.expDetected ? '예' : '아니오'}\n` +
-        `출처: ${auxResult.sources.join(' | ') || 'N/A'}\n` +
-        `모델 라인 index: ${(auxResult.debug.modelLines || []).join(' | ') || 'N/A'}\n` +
-        `aux 소스 라인: ${(auxResult.debug.sourceLines || []).join(' | ') || 'N/A'}\n` +
-        `선택된 aux: ${auxResult.debug.selected.join(' | ') || '없음'}\n` +
-        `후보 출현 횟수: ${(auxResult.debug.counts || []).join(' | ') || '없음'}\n` +
-        `제외된 aux: ${(auxResult.debug.excluded || []).join(' | ') || '없음'}\n` +
-        `분해 로그: ${(auxResult.debug.decomposition || []).join(' | ') || '없음'}`;
-      appendRawLog('선택된 aux/EXP', auxDetail);
-      appendRawLog('최종 선택', debugSummary);
-      return;
+      const applied = applyCandidateSelection(best, contextsForBest);
+      if (applied) return;
     }
 
     if (lastRawText) {
