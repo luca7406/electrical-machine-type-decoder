@@ -1107,6 +1107,8 @@
   let activeCorePath = TESSERACT_CORE_PATH;
   let activeLangPath = TESSERACT_LANG_PATH;
   let cdnFallbackApplied = false;
+  let sharedWorkerPromise = null;
+  let sharedWorkerInfo = null;
 
   const activateCdnFallback = () => {
     if (cdnFallbackApplied) return;
@@ -1123,6 +1125,45 @@
   function allOptionMatches(s, cs){
     const m=[]; for(let i=0;i<s.length;i++){ cs.forEach(c=>{ if(s.substr(i,c.length)===c) m.push({code:c,start:i,end:i+c.length}); }); }
     return m;
+  }
+
+  async function getSharedWorker(preferBlobWorker = false) {
+    if (sharedWorkerPromise) return sharedWorkerPromise;
+    const attempts = preferBlobWorker ? [true, false] : [false, true];
+    sharedWorkerPromise = (async () => {
+      let lastErr = null;
+      for (const useBlobWorker of attempts) {
+        try {
+          const T = await ensureTesseract();
+          const worker = await withTimeout(
+            T.createWorker(
+              'eng',
+              undefined,
+              {
+                workerPath: activeWorkerPath,
+                corePath: activeCorePath,
+                langPath: activeLangPath,
+                workerBlobURL: useBlobWorker
+              }
+            ),
+            10000,
+            'OCR 워커 준비가 지연되고 있습니다. (네트워크 연결을 확인해주세요)'
+          );
+          sharedWorkerInfo = { worker, useBlobWorker };
+          return worker;
+        } catch (e) {
+          lastErr = e;
+          console.error('워커 생성 실패, blob=', useBlobWorker, e);
+          if (!cdnFallbackApplied) {
+            activateCdnFallback();
+            console.warn('워커 로드 실패, CDN 경로로 재시도합니다.');
+            continue;
+          }
+        }
+      }
+      throw lastErr || new Error('Tesseract 워커 생성 실패');
+    })();
+    return sharedWorkerPromise;
   }
   function filterInvalidOptionCombos(cs){
     const u=[...cs];
@@ -1496,14 +1537,15 @@ async function withTimeout(promise, ms, label) {
   }
 }
 
-const NAMEPLATE_TOP_RATIO_PRIMARY = 0.45;
-const NAMEPLATE_TOP_RATIO_SECONDARY = 0.55;
-const NAMEPLATE_TOP_RATIOS = [0.45, 0.55, 0.7, 0.85, 1.0];
+const NAMEPLATE_TOP_RATIO_PRIMARY = 0.7;
+const NAMEPLATE_TOP_RATIO_SECONDARY = 0.85;
+const NAMEPLATE_TOP_RATIOS = [0.7, 0.85, 1.0];
 const MODEL_STOP_WORDS = ['MADE', 'KOREA', 'EAC'];
 const OCR_UPSCALE_FACTOR = 2;
 const OCR_THRESHOLD = 170;
 const MAX_PREVIEW_WIDTH = 640;
 const MAX_PREVIEW_HEIGHT = 420;
+const preprocessCache = new Map();
 
 function createUpscaledCanvas(source, scale = 1) {
   const target = document.createElement('canvas');
@@ -1604,15 +1646,20 @@ async function preprocessCroppedCanvas(canvas, {
   return target;
 }
 
-function generateOcrVariants(canvas, baseLabel = '') {
+function generateOcrVariants(canvas, baseLabel = '', { cacheKeyPrefix = '' } = {}) {
   if (!canvas) return [];
   const presets = [
     { label: `${baseLabel}·표준`, contrastLowPercent: 2, contrastHighPercent: 98, gamma: 1.0, threshold: 175, sharpen: false },
     { label: `${baseLabel}·샤프`, contrastLowPercent: 1, contrastHighPercent: 99, gamma: 0.95, threshold: 165, sharpen: true },
-    { label: `${baseLabel}·고대비`, contrastLowPercent: 0.5, contrastHighPercent: 99.5, gamma: 1.1, threshold: 150, sharpen: false },
   ];
-  return presets.map(opts => preprocessCroppedCanvas(canvas, opts)
-    .then(cv => ({ label: opts.label, canvas: cv })));
+  return presets.map(opts => {
+    const key = `${cacheKeyPrefix || baseLabel}:${opts.label}`;
+    if (preprocessCache.has(key)) return preprocessCache.get(key);
+    const promise = preprocessCroppedCanvas(canvas, opts)
+      .then(cv => ({ label: opts.label, canvas: cv }));
+    preprocessCache.set(key, promise);
+    return promise;
+  });
 }
 
 async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
@@ -1640,7 +1687,7 @@ async function cropTopRegion(file, topRatio = NAMEPLATE_TOP_RATIO_PRIMARY) {
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
 
   const label = `상단 ${Math.round(topRatio * 100)}%`;
-  const variants = await Promise.all(generateOcrVariants(canvas, label));
+  const variants = await Promise.all(generateOcrVariants(canvas, label, { cacheKeyPrefix: `${label}` }));
   return { label, variants };
 }
 
@@ -1913,35 +1960,59 @@ function gatherAuxFromContexts(model, contexts) {
   const modelLineInfos = [];
   const auxSources = [];
 
+  const withLineContext = (contexts || []).find(c => c?.runId && Array.isArray(c.lines) && typeof c.lineIndex === 'number' && c.lineIndex >= 0);
+  const targetRunId = withLineContext?.runId || null;
+  const scopedContexts = targetRunId ? (contexts || []).filter(c => c.runId === targetRunId) : (contexts || []);
+
   const evaluateAuxToken = (tok) => {
     const value = tok?.value || '';
     const len = value.length;
     const digits = (value.match(/\d/g) || []).length;
     const alphas = (value.match(/[A-Z]/g) || []).length;
-    const digitRatio = len ? digits / len : 0;
-    if (len < 6 || len > 12) return { exclude: true, reason: '길이 6~12 아님' };
+    const optionLike = /^(?:[A-Z]{1,2}\d){2,}[A-Z0-9]*$/.test(value);
+    if (len < 6 || len > 14) return { exclude: true, reason: '길이 6~14 아님' };
     if (/^\d+$/.test(value)) return { exclude: true, reason: '순수 숫자' };
-    if (/\d{4,}/.test(value)) return { exclude: true, reason: '숫자 4개 이상 연속' };
-    if (digitRatio >= 0.5) return { exclude: true, reason: '숫자 비율 50% 이상' };
-    if (len > 10 && digits >= 3) return { exclude: true, reason: '길이 > 10 & 숫자 3개 이상' };
     if (MODEL_STOP_WORDS.some(w => value.includes(w))) return { exclude: true, reason: 'STOP WORD' };
 
+    if (optionLike) return { exclude: false, score: 6 };
+    if (/\d{4,}/.test(value)) return { exclude: true, reason: '숫자 4개 이상 연속' };
+    const digitRatio = len ? digits / len : 0;
+    if (digitRatio >= 0.7) return { exclude: true, reason: '숫자 비율 70% 이상' };
+
     let score = 0;
-    if (alphas && alphas / len >= 0.7) score += 3;
-    if (len >= 6 && len <= 8) score += 2;
+    if (alphas && alphas / len >= 0.5) score += 3;
+    if (len >= 6 && len <= 10) score += 2;
     if (tok.relation === 'next-line' || tok.relation === 'second-next') score += 3;
     if (score <= 0) return { exclude: true, reason: '유효 가점 없음' };
     return { exclude: false, score };
   };
 
-  for (const ctx of contexts || []) {
+  for (const ctx of scopedContexts) {
     const text = ctx?.text || '';
     const label = ctx?.label || 'N/A';
+    const lines = Array.isArray(ctx?.lines) ? ctx.lines : [];
     const canonText = normalizeNameplateText(text).replace(/\s+/g, '');
     if (!canonText.includes(canonModel) && !canonText.includes(canonModel.replace(/-/g, ''))) {
       continue;
     }
-    const { tokens, hasExp, decomposition, modelLineIdx, usedLines } = extractAuxTokensFromText(text, model);
+
+    let scopedText = text;
+    let hintedModelIdx = ctx?.lineIndex ?? -1;
+    if (lines.length) {
+      const joinLine = (ln) => (ln?.text || '').toString();
+      const all = lines.map(joinLine);
+      if (hintedModelIdx < 0) {
+        hintedModelIdx = all.findIndex(ln => ln && ln.toUpperCase().includes(canonModel));
+      }
+      if (hintedModelIdx >= 0) {
+        const subset = [all[hintedModelIdx]];
+        if (all[hintedModelIdx + 1]) subset.push(all[hintedModelIdx + 1]);
+        if (all[hintedModelIdx + 2]) subset.push(all[hintedModelIdx + 2]);
+        scopedText = subset.join('\n');
+      }
+    }
+
+    const { tokens, hasExp, decomposition, modelLineIdx, usedLines } = extractAuxTokensFromText(scopedText, model);
     if (Array.isArray(decomposition)) decompositionLogs.push(...decomposition.map(d => `${label}: ${d}`));
     if (hasExp) expDetected = true;
     if (typeof modelLineIdx === 'number' && modelLineIdx >= 0) {
@@ -2010,7 +2081,22 @@ function normalizeModelCandidate(s) {
     .trim();
 }
 
-function collectModelCandidates(rawText, label, pool, confidence = 0) {
+function findLineMatch(model, lines) {
+  if (!Array.isArray(lines) || !lines.length) return { lineIndex: -1, bbox: null };
+  const norm = (s) => (s || '').toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  const target = norm(model);
+  const targetNoDash = target.replace(/-/g, '');
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = norm(lines[i]?.text || '');
+    if (!lineText) continue;
+    if (lineText.includes(target) || lineText.includes(targetNoDash)) {
+      return { lineIndex: i, bbox: lines[i]?.bbox || null };
+    }
+  }
+  return { lineIndex: -1, bbox: null };
+}
+
+function collectModelCandidates(rawText, label, pool, confidence = 0, runMeta = {}) {
   if (!rawText) return;
   const lines = (rawText || '')
     .split(/\r?\n/)
@@ -2042,7 +2128,22 @@ function collectModelCandidates(rawText, label, pool, confidence = 0) {
     entry.count += 1;
     if (STRICT_MODEL_REGEX.test(model)) entry.strictHits += 1;
     if (!entry.sources.includes(label)) entry.sources.push(label);
-    entry.contexts.push({ label, text: rawText });
+    const { lineIndex, bbox } = findLineMatch(model, runMeta.lines || []);
+    entry.contexts.push({
+      label,
+      text: rawText,
+      runId: runMeta.runId || null,
+      lines: runMeta.lines || [],
+      lineIndex,
+      bbox,
+      canvasWidth: runMeta.canvasWidth,
+      canvasHeight: runMeta.canvasHeight,
+      scaledWidth: runMeta.scaledWidth,
+      scaledHeight: runMeta.scaledHeight,
+      originalWidth: runMeta.originalWidth,
+      originalHeight: runMeta.originalHeight,
+      cropRatio: runMeta.cropRatio,
+    });
     entry.bestConfidence = Math.max(entry.bestConfidence || 0, confidence || 0);
   };
 
@@ -2365,6 +2466,40 @@ async function prepareImage(file) {
   return blob;
 }
 
+const imageCache = new WeakMap();
+async function blobToImage(blob) {
+  if (!blob) return null;
+  if (imageCache.has(blob)) return imageCache.get(blob);
+  const p = new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('이미지 디코딩 실패'));
+    img.src = url;
+  });
+  imageCache.set(blob, p);
+  return p;
+}
+
+function resizeImageToWidth(img, targetWidth) {
+  const scale = targetWidth && img.width > targetWidth ? targetWidth / img.width : 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return { canvas, scale };
+}
+
+function cropCanvas(sourceCanvas, { x = 0, y = 0, width = sourceCanvas.width, height = sourceCanvas.height }) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(sourceCanvas, x, y, width, height, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
 function renderOcrRaw(text) {
   const rawArea = document.getElementById('ocrRawText');
   const toggle = document.getElementById('showRawOcr');
@@ -2523,7 +2658,7 @@ async function cropRoiVariants(file) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   const label = roi ? `ROI ${Math.round(sw)}x${Math.round(sh)}` : 'ROI';
-  const variants = await Promise.all(generateOcrVariants(canvas, label));
+  const variants = await Promise.all(generateOcrVariants(canvas, label, { cacheKeyPrefix: `roi:${label}` }));
   return { label, variants };
 }
 
@@ -2581,7 +2716,6 @@ const attachOCR = () => {
 
     // WebKit(iOS)에서 Web Worker 제약을 우선 고려하여 blob 워커를 먼저 시도한다.
     const preferBlobWorker = location.protocol === 'file:' ? true : isIOSWebKit;
-    const attempts = preferBlobWorker ? [true, false] : [false, true];
 
     let lastErr = null;
     let lastRawText = '';
@@ -2597,19 +2731,19 @@ const attachOCR = () => {
     };
 
     const sourceImage = activeFile;
+    let baseImageEl = null;
     const cropCache = new Map();
     const cropVariants = NAMEPLATE_TOP_RATIOS.map(ratio => ({
       ratio,
       label: `상단 ${Math.round(ratio * 100)}%`
     }));
-    const psmModes = ['7', '6'];
     const modelCandidates = new Map();
 
-    const considerResult = (text, label, confidence = 0, poolTarget = modelCandidates) => {
-      if (!text || isStale()) return;
-      collectModelCandidates(text, label, poolTarget, confidence);
+    const considerResult = (text, label, confidence = 0, poolTarget = modelCandidates, runMeta = {}) => {
+      if (!text || isStale()) return false;
+      collectModelCandidates(text, label, poolTarget, confidence, runMeta);
       const localPool = new Map();
-      collectModelCandidates(text, label, localPool, confidence);
+      collectModelCandidates(text, label, localPool, confidence, runMeta);
       const localBest = pickBestModelVariant(localPool);
       const validity = localBest
         ? (100 - (localBest.unknown || 0) * 10) + (localBest.patternScore || 0) + (localBest.familyHit ? 5 : 0)
@@ -2625,11 +2759,15 @@ const attachOCR = () => {
           composite
         };
       }
+      const bestGlobal = pickBestModelVariant(modelCandidates);
+      return Boolean(bestGlobal && bestGlobal.unknown === 0);
     };
 
-    const getCrop = async (ratio) => {
+    const getCrop = async (ratio, baseCanvas, cachePrefix) => {
       if (!cropCache.has(ratio)) {
-        cropCache.set(ratio, await cropTopRegion(sourceImage, ratio));
+        const cropped = cropCanvas(baseCanvas, { x: 0, y: 0, width: baseCanvas.width, height: baseCanvas.height * ratio });
+        const variants = await Promise.all(generateOcrVariants(cropped, `상단 ${Math.round(ratio * 100)}%`, { cacheKeyPrefix: cachePrefix }));
+        cropCache.set(ratio, { label: `상단 ${Math.round(ratio * 100)}%`, variants, canvas: cropped });
       }
       return cropCache.get(ratio);
     };
@@ -2637,7 +2775,9 @@ const attachOCR = () => {
     const applyCandidateSelection = (best, contexts, prefixLabel = '') => {
       if (!best || isStale()) return false;
       const resolved = resolveAmbiguousO0(best.candidate);
-      const auxResult = gatherAuxFromContexts(resolved.resolved, contexts || []);
+      const preferredCtx = (contexts || []).find(c => c?.runId && typeof c.lineIndex === 'number' && c.lineIndex >= 0);
+      const scopedContexts = preferredCtx ? (contexts || []).filter(c => c.runId === preferredCtx.runId) : (contexts || []);
+      const auxResult = gatherAuxFromContexts(resolved.resolved, scopedContexts || []);
       const parts = [resolved.resolved];
       if (auxResult.aux.length) parts.push(...auxResult.aux);
       if (auxResult.expDetected) parts.push('EXP');
@@ -2679,65 +2819,145 @@ const attachOCR = () => {
     };
 
     const performAutoOcr = async () => {
-      for (const useBlobWorker of attempts) {
-        let worker;
-        try {
-          setBusy(true, useBlobWorker ? '인식 중... (오프라인 워커)' : '인식 중... (온라인 워커)');
-          const T = await ensureTesseract();
-          worker = await withTimeout(
-            T.createWorker(
-              'eng',
-              undefined,
-              {
-                workerPath: activeWorkerPath,
-                corePath: activeCorePath,
-                langPath: activeLangPath,
-                workerBlobURL: useBlobWorker
-              }
-            ),
-            10000,
-            'OCR 워커 준비가 지연되고 있습니다. (네트워크 연결을 확인해주세요)'
+      try {
+        const worker = await getSharedWorker(preferBlobWorker);
+        setBusy(true, sharedWorkerInfo?.useBlobWorker ? '인식 중... (오프라인 워커)' : '인식 중... (온라인 워커)');
+        baseImageEl = await blobToImage(sourceImage);
+        if (!baseImageEl) throw new Error('이미지 로드 실패');
+        const { canvas: coarseBase } = resizeImageToWidth(baseImageEl, 1200);
+
+        for (const variant of cropVariants) {
+          const cropData = await getCrop(variant.ratio, coarseBase, `job${jobId}:auto:${variant.ratio}`);
+          const primary = await (cropData?.variants?.[0]?.canvas || null);
+          if (!primary) continue;
+
+          await withTimeout(worker.setParameters({
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+            tessedit_pageseg_mode: '6',
+          }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM 6, ${variant.label})`);
+
+          const { data: { text, confidence, lines } } = await withTimeout(
+            worker.recognize(primary),
+            15000,
+            `이미지 인식이 오래 걸립니다. (${variant.label}, PSM 6)`
           );
 
-          for (const variant of cropVariants) {
-            const cropped = await getCrop(variant.ratio);
-            const enhancedList = cropped?.variants || [];
-            for (const enhanced of enhancedList) {
-              const enhancedCanvas = await enhanced.canvas;
-              if (!enhancedCanvas) continue;
-              for (const mode of psmModes) {
-                await withTimeout(worker.setParameters({
-                  tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-                  preserve_interword_spaces: '1',
-                  user_defined_dpi: '300',
-                  tessedit_pageseg_mode: mode,
-                }), 8000, `OCR 파라미터 설정이 지연되고 있습니다. (PSM ${mode}, ${enhanced.label})`);
-
-                const { data: { text, confidence } } = await withTimeout(
-                  worker.recognize(enhancedCanvas),
-                  15000,
-                  `이미지 인식이 오래 걸립니다. (${enhanced.label}, PSM ${mode}) 사진 해상도를 낮추거나 네트워크 상태를 확인해주세요.`
-                );
-
-                const rawText = text || '';
-                const attemptLabel = `${enhanced.label}, PSM ${mode}`;
-                appendRawLog(attemptLabel, rawText);
-                considerResult(rawText, attemptLabel, confidence, modelCandidates);
-              }
-            }
-          }
-        } catch (e) {
-          lastErr = e;
-          console.error('OCR 실패, useBlobWorker=', useBlobWorker, e);
-          if (!cdnFallbackApplied) {
-            activateCdnFallback();
-            console.warn('로컬 워커 로드 실패, CDN 경로로 재시도합니다.');
-            continue;
-          }
-        } finally {
-          setBusy(false);
-          try { await worker?.terminate(); } catch (_) {}
+          const rawText = text || '';
+          const attemptLabel = `${variant.label}, PSM 6`;
+          appendRawLog(attemptLabel, rawText);
+          const early = considerResult(rawText, attemptLabel, confidence, modelCandidates, {
+            runId: `auto-coarse-${variant.ratio}`,
+            lines,
+            canvasWidth: primary.width,
+            canvasHeight: primary.height,
+            scaledWidth: coarseBase.width,
+            scaledHeight: coarseBase.height,
+            originalWidth: baseImageEl.width,
+            originalHeight: baseImageEl.height,
+            cropRatio: variant.ratio,
+          });
+          if (early) return;
         }
+      } catch (e) {
+        lastErr = e;
+        console.error('OCR 실패', e);
+        if (!cdnFallbackApplied) {
+          activateCdnFallback();
+          console.warn('로컬 워커 로드 실패, CDN 경로로 재시도합니다.');
+        }
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const performFineOcr = async (anchorCandidate) => {
+      if (!anchorCandidate) return;
+      const anchorCtx = (anchorCandidate.contexts || []).find(c => c?.runId?.startsWith('auto-coarse') && c.bbox && c.canvasWidth && c.canvasHeight);
+      if (!anchorCtx || !anchorCtx.bbox) return;
+      const worker = await getSharedWorker(preferBlobWorker);
+      if (!baseImageEl) baseImageEl = await blobToImage(sourceImage);
+      if (!baseImageEl) return;
+
+      const fullCanvas = document.createElement('canvas');
+      fullCanvas.width = baseImageEl.width;
+      fullCanvas.height = baseImageEl.height;
+      fullCanvas.getContext('2d').drawImage(baseImageEl, 0, 0, fullCanvas.width, fullCanvas.height);
+
+      const bbox = anchorCtx.bbox;
+      const scaleX = (anchorCtx.originalWidth || fullCanvas.width) / (anchorCtx.scaledWidth || anchorCtx.canvasWidth || fullCanvas.width);
+      const scaleY = (anchorCtx.originalHeight || fullCanvas.height) / (anchorCtx.scaledHeight || anchorCtx.canvasHeight || fullCanvas.height);
+      const box = {
+        x: (bbox.x0 || bbox.left || 0) * scaleX,
+        y: (bbox.y0 || bbox.top || 0) * scaleY,
+        width: ((bbox.x1 ?? bbox.right ?? bbox.x0 || 0) - (bbox.x0 || bbox.left || 0)) * scaleX,
+        height: ((bbox.y1 ?? bbox.bottom ?? bbox.y0 || 0) - (bbox.y0 || bbox.top || 0)) * scaleY,
+      };
+      const marginX = box.width * 0.4;
+      const marginY = box.height * 1.6;
+      const cropX = Math.max(0, box.x - marginX);
+      const cropY = Math.max(0, box.y - marginY * 0.3);
+      const cropW = Math.min(fullCanvas.width - cropX, box.width + marginX * 2);
+      const cropH = Math.min(fullCanvas.height - cropY, box.height + marginY);
+
+      const cropped = cropCanvas(fullCanvas, { x: cropX, y: cropY, width: cropW, height: cropH });
+      const variants = await Promise.all(generateOcrVariants(cropped, '정밀', { cacheKeyPrefix: `job${jobId}:fine` }));
+      const highContrast = preprocessCroppedCanvas(cropped, { label: '정밀·고대비', contrastLowPercent: 0.5, contrastHighPercent: 99.5, gamma: 1.1, threshold: 150, sharpen: false })
+        .then(cv => ({ label: '정밀·고대비', canvas: cv }));
+      const candidateVariants = [...variants];
+
+      for (const preset of candidateVariants) {
+        const canvas = await preset.canvas;
+        if (!canvas) continue;
+        await withTimeout(worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_pageseg_mode: '6',
+        }), 8000, `정밀 OCR 파라미터 설정 지연 (PSM 6, ${preset.label})`);
+
+        const { data: { text, confidence, lines } } = await withTimeout(
+          worker.recognize(canvas),
+          15000,
+          `정밀 인식 지연 (${preset.label}, PSM 6)`
+        );
+        const rawText = text || '';
+        appendRawLog(`${preset.label}, PSM 6`, rawText);
+        const early = considerResult(rawText, `${preset.label}, PSM 6`, confidence, modelCandidates, {
+          runId: 'auto-fine',
+          lines,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          originalWidth: fullCanvas.width,
+          originalHeight: fullCanvas.height,
+          scaledWidth: fullCanvas.width,
+          scaledHeight: fullCanvas.height,
+        });
+        if (early) return;
+      }
+
+      const hc = await highContrast;
+      if (hc?.canvas && !pickBestModelVariant(modelCandidates)) {
+        await withTimeout(worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_pageseg_mode: '7',
+        }), 8000, '정밀 OCR 파라미터 설정 지연 (PSM 7, 고대비)');
+        const { data: { text, confidence, lines } } = await withTimeout(worker.recognize(hc.canvas), 15000, '정밀 인식 지연 (고대비)');
+        const rawText = text || '';
+        appendRawLog('정밀·고대비, PSM 7', rawText);
+        considerResult(rawText, '정밀·고대비, PSM 7', confidence, modelCandidates, {
+          runId: 'auto-fine',
+          lines,
+          canvasWidth: hc.canvas.width,
+          canvasHeight: hc.canvas.height,
+          originalWidth: fullCanvas.width,
+          originalHeight: fullCanvas.height,
+          scaledWidth: fullCanvas.width,
+          scaledHeight: fullCanvas.height,
+        });
       }
     };
 
@@ -2747,69 +2967,93 @@ const attachOCR = () => {
         alert('ROI를 먼저 드래그로 지정해주세요.');
         return false;
       }
-      for (const useBlobWorker of attempts) {
-        const roiPool = new Map();
-        const roiContexts = [];
-        let worker;
-        try {
-          setBusy(true, useBlobWorker ? 'ROI 인식 중... (오프라인)' : 'ROI 인식 중... (온라인)');
-          const T = await ensureTesseract();
-          worker = await withTimeout(
-            T.createWorker(
-              'eng',
-              undefined,
-              {
-                workerPath: activeWorkerPath,
-                corePath: activeCorePath,
-                langPath: activeLangPath,
-                workerBlobURL: useBlobWorker
-              }
-            ),
-            10000,
-            'OCR 워커 준비가 지연되고 있습니다. (ROI 모드)'
+      const roiPool = new Map();
+      const roiContexts = [];
+      try {
+        const worker = await getSharedWorker(preferBlobWorker);
+        setBusy(true, sharedWorkerInfo?.useBlobWorker ? 'ROI 인식 중... (오프라인)' : 'ROI 인식 중... (온라인)');
+        const variants = roiData.variants || [];
+        let hit = false;
+
+        for (const enhanced of variants) {
+          const enhancedCanvas = await enhanced.canvas;
+          if (!enhancedCanvas) continue;
+          await withTimeout(worker.setParameters({
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+            tessedit_pageseg_mode: '6',
+          }), 8000, `ROI OCR 파라미터 설정 지연 (PSM 6, ${enhanced.label})`);
+
+          const { data: { text, confidence, lines } } = await withTimeout(
+            worker.recognize(enhancedCanvas),
+            12000,
+            `ROI 인식 지연 (${enhanced.label}, PSM 6)`
           );
 
-          for (const mode of ['7', '6']) {
+          const rawText = text || '';
+          const label = `${enhanced.label}, PSM 6`;
+          appendRawLog(label, rawText);
+          const early = considerResult(rawText, label, confidence, roiPool, {
+            runId: 'roi',
+            lines,
+            canvasWidth: enhancedCanvas.width,
+            canvasHeight: enhancedCanvas.height,
+            originalWidth: enhancedCanvas.width,
+            originalHeight: enhancedCanvas.height,
+            scaledWidth: enhancedCanvas.width,
+            scaledHeight: enhancedCanvas.height,
+          });
+          roiContexts.push({ label, text: rawText, lines, runId: 'roi', lineIndex: -1 });
+          hit = hit || early;
+          if (early) break;
+        }
+
+        if (!hit && !roiPool.size) {
+          for (const enhanced of variants) {
+            const enhancedCanvas = await enhanced.canvas;
+            if (!enhancedCanvas) continue;
             await withTimeout(worker.setParameters({
               tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
               preserve_interword_spaces: '1',
               user_defined_dpi: '300',
-              tessedit_pageseg_mode: mode,
-            }), 8000, `ROI OCR 파라미터 설정 지연 (PSM ${mode})`);
-
-            for (const enhanced of roiData.variants || []) {
-              const enhancedCanvas = await enhanced.canvas;
-              if (!enhancedCanvas) continue;
-              const { data: { text, confidence } } = await withTimeout(
-                worker.recognize(enhancedCanvas),
-                12000,
-                `ROI 인식 지연 (${enhanced.label}, PSM ${mode})`
-              );
-
-              const rawText = text || '';
-              const label = `${enhanced.label}, PSM ${mode}`;
-              appendRawLog(label, rawText);
-              considerResult(rawText, label, confidence, roiPool);
-              roiContexts.push({ label, text: rawText });
-            }
+              tessedit_pageseg_mode: '7',
+            }), 8000, `ROI OCR 파라미터 설정 지연 (PSM 7, ${enhanced.label})`);
+            const { data: { text, confidence, lines } } = await withTimeout(
+              worker.recognize(enhancedCanvas),
+              12000,
+              `ROI 인식 지연 (${enhanced.label}, PSM 7)`
+            );
+            const rawText = text || '';
+            const label = `${enhanced.label}, PSM 7`;
+            appendRawLog(label, rawText);
+            considerResult(rawText, label, confidence, roiPool, {
+              runId: 'roi',
+              lines,
+              canvasWidth: enhancedCanvas.width,
+              canvasHeight: enhancedCanvas.height,
+              originalWidth: enhancedCanvas.width,
+              originalHeight: enhancedCanvas.height,
+              scaledWidth: enhancedCanvas.width,
+              scaledHeight: enhancedCanvas.height,
+            });
+            roiContexts.push({ label, text: rawText, lines, runId: 'roi', lineIndex: -1 });
           }
-
-          const best = pickBestModelVariant(roiPool);
-          if (best && STRICT_MODEL_REGEX.test(best.candidate)) {
-            return applyCandidateSelection(best, roiContexts, 'ROI');
-          }
-        } catch (e) {
-          lastErr = e;
-          console.error('ROI OCR 실패, useBlobWorker=', useBlobWorker, e);
-          if (!cdnFallbackApplied) {
-            activateCdnFallback();
-            console.warn('ROI 워커 로드 실패, CDN 경로로 재시도합니다.');
-            continue;
-          }
-        } finally {
-          setBusy(false);
-          try { await worker?.terminate(); } catch (_) {}
         }
+
+        const best = pickBestModelVariant(roiPool);
+        if (best && STRICT_MODEL_REGEX.test(best.candidate)) {
+          return applyCandidateSelection(best, roiContexts, 'ROI');
+        }
+      } catch (e) {
+        lastErr = e;
+        console.error('ROI OCR 실패', e);
+        if (!cdnFallbackApplied) {
+          activateCdnFallback();
+          console.warn('ROI 워커 로드 실패, CDN 경로로 재시도합니다.');
+        }
+      } finally {
+        setBusy(false);
       }
       return false;
     };
@@ -2824,6 +3068,15 @@ const attachOCR = () => {
     }
 
     await performAutoOcr();
+
+    const coarseBest = pickBestModelVariant(modelCandidates);
+    if (coarseBest && coarseBest.unknown === 0) {
+      const applied = applyCandidateSelection(coarseBest, coarseBest.contexts || [], 'AUTO');
+      if (applied) return;
+    }
+    if (coarseBest && coarseBest.unknown !== 0) {
+      await performFineOcr(coarseBest);
+    }
 
     const extraEntry = bestOcrResult?.candidate ? {
       candidate: normalizeModelCandidate(bestOcrResult.candidate),
