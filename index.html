@@ -1077,11 +1077,12 @@
   </div>
 </div>
 
-<script>
-(() => {
-  const errBox = document.getElementById('err');
-  const showErr = (msg) => { errBox.textContent = msg; errBox.style.display='block'; };
-  const clearErr = () => { errBox.style.display='none'; errBox.textContent=''; };
+  <script>
+  (() => {
+    console.log("PARSE OK: script loaded");
+    const errBox = document.getElementById('err');
+    const showErr = (msg) => { errBox.textContent = msg; errBox.style.display='block'; };
+    const clearErr = () => { errBox.style.display='none'; errBox.textContent=''; };
 
   // 0) 데이터 로드
   const defaultFamilies = JSON.parse(document.getElementById('familyData').textContent || '{}');
@@ -1986,29 +1987,29 @@ function extractAuxTokensFromText(text, model) {
 
       const gluedSource = (cleanedLine.replace(/[^A-Z0-9]/g, ' ') || '').match(/[A-Z0-9]{6,}/g) || [];
 
-      for (const seq of gluedSource) {
-        const tokens = splitAuxSequence(seq);
-        decomposition.push(`(${relation}) glued 원본: ${seq} -> ${tokens.join(', ') || '없음'}`);
+    for (const seq of gluedSource) {
+      const tokens = splitAuxSequence(seq);
+      decomposition.push(`(${relation}) glued 원본: ${seq} -> ${tokens.join(', ') || '없음'}`);
 
-        for (const tok of tokens) {
-          // 원본 토큰은 그대로
-          pushToken(tok, 'glued', relation, seq);
+      for (const tok of tokens) {
+        // 원본 토큰은 그대로
+        pushToken(tok, 'glued', relation, seq);
 
-          // ✅ O/0 변형 후보 추가
-          if (/[O0]/.test(tok)) {
-            const v1 = tok.replace(/O/g, '0'); // O -> 0
-            const v2 = tok.replace(/0/g, 'O'); // 0 -> O
+        // ✅ O/0 변형 후보 추가
+        if (/[O0]/.test(tok)) {
+          const v1 = tok.replace(/O/g, '0'); // O -> 0
+          const v2 = tok.replace(/0/g, 'O'); // 0 -> O
 
-            if (v1 !== tok) pushToken(v1, 'glued:o0', relation, seq);
-            if (v2 !== tok) pushToken(v2, 'glued:0o', relation, seq);
+          if (v1 !== tok) pushToken(v1, 'glued:o0', relation, seq);
+          if (v2 !== tok) pushToken(v2, 'glued:0o', relation, seq);
 
-            // (옵션) 숫자 옆 O만 0으로 바꾼 후보 (더 보수적)
-            const v3 = tok.replace(/(\d)O/g, '$10').replace(/O(\d)/g, '0$1');
-            if (v3 !== tok && v3 !== v1) pushToken(v3, 'glued:digitO0', relation, seq);
-          }
+          // (옵션) 숫자 옆 O만 0으로 바꾼 후보 (더 보수적)
+          const v3 = tok.replace(/(\d)O/g, '$10').replace(/O(\d)/g, '0$1');
+          if (v3 !== tok && v3 !== v1) pushToken(v3, 'glued:digitO0', relation, seq);
         }
       }
-    });
+    }
+  });
 
     return { tokens: auxTokens, hasExp: expDetected, decomposition, modelLineIdx, usedLines };
   }
